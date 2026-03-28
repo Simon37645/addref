@@ -12,6 +12,9 @@
       maxTargets: "4",
       resultsPerQuery: "6",
       maxAttempts: "10",
+      recentYears: "",
+      impactFactorMin: "",
+      impactFactorMax: "",
       openaiKey: "",
       ncbiKey: "",
     };
@@ -48,6 +51,9 @@
       maxTargets: String(next.maxTargets || "4"),
       resultsPerQuery: String(next.resultsPerQuery || "6"),
       maxAttempts: String(next.maxAttempts || "10"),
+      recentYears: next.recentYears === "" ? "" : String(next.recentYears || ""),
+      impactFactorMin: next.impactFactorMin === "" ? "" : String(next.impactFactorMin || ""),
+      impactFactorMax: next.impactFactorMax === "" ? "" : String(next.impactFactorMax || ""),
     };
     const secretConfig = {
       openaiKey: next.openaiKey || "",

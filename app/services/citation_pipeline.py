@@ -3,14 +3,19 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from app.services.ncbi import NCBIClient, PubMedArticle
+from app.services.openalex import OpenAlexClient
 from app.services.openai_compat import OpenAICompatClient
 
 
 class CitationPipelineError(RuntimeError):
     pass
+
+
+MAX_ARTICLES_PER_SENTENCE = 3
 
 
 @dataclass(slots=True)
@@ -21,10 +26,36 @@ class SentenceChunk:
     end: int
 
 
+@dataclass(slots=True)
+class SearchFilters:
+    recent_years: int | None = None
+    impact_factor_min: float | None = None
+    impact_factor_max: float | None = None
+
+    def has_impact_factor_filter(self) -> bool:
+        return self.impact_factor_min is not None or self.impact_factor_max is not None
+
+    def has_any_filter(self) -> bool:
+        return self.recent_years is not None or self.has_impact_factor_filter()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "recent_years": self.recent_years,
+            "impact_factor_min": self.impact_factor_min,
+            "impact_factor_max": self.impact_factor_max,
+        }
+
+
 class CitationPipeline:
-    def __init__(self, llm: OpenAICompatClient, ncbi: NCBIClient) -> None:
+    def __init__(
+        self,
+        llm: OpenAICompatClient,
+        ncbi: NCBIClient,
+        openalex: OpenAlexClient | None = None,
+    ) -> None:
         self.llm = llm
         self.ncbi = ncbi
+        self.openalex = openalex
 
     def run(
         self,
@@ -32,6 +63,9 @@ class CitationPipeline:
         max_targets: int = 4,
         max_attempts: int = 10,
         results_per_query: int = 6,
+        search_filters: SearchFilters | None = None,
+        existing_references: list[dict[str, Any]] | None = None,
+        existing_placements: list[dict[str, Any]] | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         source_text = (text or "").strip()
@@ -39,6 +73,9 @@ class CitationPipeline:
             raise CitationPipelineError("Text is required.")
         if len(source_text) > 20000:
             raise CitationPipelineError("Text is too long. Please keep it within 20,000 characters.")
+        active_filters = search_filters or SearchFilters()
+        if active_filters.has_impact_factor_filter() and self.openalex is None:
+            raise CitationPipelineError("使用 IF 区间过滤前，请先在 auth.json 配置 OPENALEX_APIkey。")
 
         _emit_progress(
             progress_callback,
@@ -51,6 +88,26 @@ class CitationPipeline:
         if not sentences:
             raise CitationPipelineError("Could not identify sentences from the provided text.")
 
+        normalized_references = _normalize_existing_references(existing_references or [])
+        valid_markers = {int(reference["marker"]) for reference in normalized_references}
+        normalized_placements = _normalize_existing_placements(
+            existing_placements or [],
+            sentences=sentences,
+            valid_markers=valid_markers,
+        )
+        cited_sentence_ids = {int(placement["sentence_id"]) for placement in normalized_placements}
+        selectable_sentences = [sentence for sentence in sentences if sentence.sentence_id not in cited_sentence_ids]
+        marker_map = {
+            str(reference.get("article", {}).get("pmid", "")).strip(): int(reference["marker"])
+            for reference in normalized_references
+            if str(reference.get("article", {}).get("pmid", "")).strip()
+        }
+        references: list[dict[str, Any]] = list(normalized_references)
+        placements: list[dict[str, Any]] = list(normalized_placements)
+        unresolved_targets: list[dict[str, Any]] = []
+        existing_reference_count = len(references)
+        existing_placement_count = len(placements)
+
         _emit_progress(
             progress_callback,
             stage="select_targets",
@@ -59,13 +116,9 @@ class CitationPipeline:
             detail="正在选择最需要插入文献的位置。",
         )
         planned_targets = sorted(
-            self._select_targets(sentences, max_targets),
+            self._select_targets(selectable_sentences, max_targets),
             key=lambda item: item["sentence_id"],
         )
-        placements: list[dict[str, Any]] = []
-        unresolved_targets: list[dict[str, Any]] = []
-        marker_map: dict[str, int] = {}
-        references: list[dict[str, Any]] = []
         total_targets = len(planned_targets)
 
         _emit_progress(
@@ -95,6 +148,7 @@ class CitationPipeline:
                 initial_query=target.get("initial_query", ""),
                 max_attempts=max_attempts,
                 results_per_query=results_per_query,
+                search_filters=active_filters,
                 target_index=target_index,
                 total_targets=total_targets,
                 progress_callback=progress_callback,
@@ -112,31 +166,37 @@ class CitationPipeline:
                 )
                 continue
 
-            article: PubMedArticle = resolution["article"]
-            marker = marker_map.get(article.pmid)
-            if marker is None:
-                marker = len(marker_map) + 1
-                marker_map[article.pmid] = marker
-                references.append(
-                    {
-                        "marker": marker,
-                        "article": article.to_brief_dict(),
-                        "reference_line": article.to_reference_line(marker),
-                    }
-                )
+            resolved_articles: list[PubMedArticle] = resolution["articles"]
+            marker_entries: list[dict[str, Any]] = []
+            for article in resolved_articles:
+                marker = marker_map.get(article.pmid)
+                if marker is None:
+                    marker = len(marker_map) + 1
+                    marker_map[article.pmid] = marker
+                    references.append(
+                        {
+                            "marker": marker,
+                            "article": article.to_brief_dict(),
+                            "reference_line": article.to_reference_line(marker),
+                        }
+                    )
+                marker_entries.append({"marker": marker, "article": article.to_brief_dict()})
 
+            markers = [item["marker"] for item in marker_entries]
             placements.append(
                 {
-                    "marker": marker,
+                    "marker": markers[0],
+                    "markers": markers,
                     "sentence_id": sentence.sentence_id,
                     "sentence_text": sentence.text,
                     "claim_summary": target.get("claim_summary", ""),
                     "reason": target.get("reason", ""),
                     "final_query": resolution["final_query"],
-                    "article": article.to_brief_dict(),
+                    "article": marker_entries[0]["article"],
+                    "articles": [item["article"] for item in marker_entries],
                     "attempts": resolution["attempts"],
                 }
-                )
+            )
 
         _emit_progress(
             progress_callback,
@@ -160,6 +220,13 @@ class CitationPipeline:
             "unresolved_targets": unresolved_targets,
             "sentence_count": len(sentences),
             "selected_target_count": len(planned_targets),
+            "search_filters": active_filters.to_dict(),
+            "source_text": source_text,
+            "continued_from_existing": bool(existing_reference_count or existing_placement_count),
+            "existing_reference_count": existing_reference_count,
+            "existing_placement_count": existing_placement_count,
+            "new_reference_count": max(0, len(references) - existing_reference_count),
+            "new_placement_count": max(0, len(placements) - existing_placement_count),
         }
 
     def _select_targets(self, sentences: list[SentenceChunk], max_targets: int) -> list[dict[str, Any]]:
@@ -221,12 +288,15 @@ class CitationPipeline:
         initial_query: str,
         max_attempts: int,
         results_per_query: int,
+        search_filters: SearchFilters,
         target_index: int,
         total_targets: int,
         progress_callback: Callable[[dict[str, Any]], None] | None,
     ) -> dict[str, Any]:
         current_query = (initial_query or fallback_query(sentence.text)).strip()
         attempts: list[dict[str, Any]] = []
+        min_publication_year = _minimum_publication_year(search_filters.recent_years)
+        raw_results_limit = _raw_results_limit(results_per_query, search_filters)
 
         for attempt_index in range(1, max_attempts + 1):
             _emit_progress(
@@ -236,7 +306,13 @@ class CitationPipeline:
                 message=f"第 {target_index}/{max(total_targets, 1)} 句，第 {attempt_index}/{max_attempts} 轮检索。",
                 detail=current_query,
             )
-            results = self.ncbi.search_pubmed(current_query, retmax=results_per_query)
+            raw_results = self.ncbi.search_pubmed(
+                current_query,
+                retmax=raw_results_limit,
+                min_publication_year=min_publication_year,
+            )
+            filtered_results = self._filter_results(raw_results, search_filters)
+            results = filtered_results[:results_per_query]
             evaluation = self._evaluate_results(
                 sentence=sentence,
                 claim_summary=claim_summary,
@@ -247,7 +323,7 @@ class CitationPipeline:
                 results=results,
             )
             decision = str(evaluation.get("decision", "")).strip().lower()
-            chosen_pmid = str(evaluation.get("chosen_pmid", "")).strip()
+            selected_pmids = _normalize_selected_pmids(evaluation, results)
             improved_query = str(evaluation.get("improved_query", "")).strip()
             evaluation_reason = str(evaluation.get("reason", "")).strip()
             confidence = evaluation.get("confidence", 0)
@@ -257,8 +333,11 @@ class CitationPipeline:
                     "attempt": attempt_index,
                     "query": current_query,
                     "result_count": len(results),
+                    "raw_result_count": len(raw_results),
+                    "filtered_out_count": max(0, len(raw_results) - len(results)),
                     "decision": decision or "retry",
-                    "chosen_pmid": chosen_pmid,
+                    "chosen_pmid": selected_pmids[0] if selected_pmids else "",
+                    "chosen_pmids": selected_pmids,
                     "confidence": confidence,
                     "reason": evaluation_reason,
                     "top_results": [article.to_brief_dict() for article in results[:3]],
@@ -273,11 +352,11 @@ class CitationPipeline:
                     message=f"第 {target_index}/{max(total_targets, 1)} 句已命中文献。",
                     detail=current_query,
                 )
-                chosen = next((article for article in results if article.pmid == chosen_pmid), None)
-                if chosen is not None:
+                chosen_articles = [article for article in results if article.pmid in selected_pmids]
+                if chosen_articles:
                     return {
                         "accepted": True,
-                        "article": chosen,
+                        "articles": chosen_articles,
                         "attempts": attempts,
                         "final_query": current_query,
                     }
@@ -296,6 +375,52 @@ class CitationPipeline:
 
         return {"accepted": False, "attempts": attempts, "final_query": current_query}
 
+    def _filter_results(
+        self,
+        results: list[PubMedArticle],
+        search_filters: SearchFilters,
+    ) -> list[PubMedArticle]:
+        filtered = list(results)
+
+        min_publication_year = _minimum_publication_year(search_filters.recent_years)
+        if min_publication_year is not None:
+            filtered = [
+                article
+                for article in filtered
+                if (_parse_year_value(article.year) or 0) >= min_publication_year
+            ]
+
+        if not search_filters.has_impact_factor_filter():
+            return filtered
+
+        matched: list[PubMedArticle] = []
+        for article in filtered:
+            impact_factor = self._resolve_impact_factor(article)
+            if impact_factor is None:
+                continue
+            if search_filters.impact_factor_min is not None and impact_factor < search_filters.impact_factor_min:
+                continue
+            if search_filters.impact_factor_max is not None and impact_factor > search_filters.impact_factor_max:
+                continue
+            matched.append(article)
+        return matched
+
+    def _resolve_impact_factor(self, article: PubMedArticle) -> float | None:
+        if article.impact_factor is not None:
+            return article.impact_factor
+        if self.openalex is None or not article.issn:
+            return None
+
+        metrics = self.openalex.get_source_metrics(article.issn)
+        if metrics is None or metrics.impact_factor is None:
+            return None
+
+        article.impact_factor = metrics.impact_factor
+        article.impact_factor_source = "OpenAlex 2yr_mean_citedness"
+        if metrics.display_name and not article.journal:
+            article.journal = metrics.display_name
+        return article.impact_factor
+
     def _evaluate_results(
         self,
         sentence: SentenceChunk,
@@ -308,7 +433,7 @@ class CitationPipeline:
     ) -> dict[str, Any]:
         previous_attempts = "\n".join(
             f"- attempt {item['attempt']}: query={item['query']}; decision={item['decision']}; "
-            f"chosen_pmid={item['chosen_pmid']}; reason={item['reason']}"
+            f"chosen_pmids={','.join(item.get('chosen_pmids', []))}; reason={item['reason']}"
             for item in attempts[-3:]
         )
         result_text = format_search_results(results)
@@ -316,11 +441,12 @@ class CitationPipeline:
         system_prompt = (
             "You evaluate whether PubMed search results directly support a target biomedical sentence. "
             "Return strict JSON only with this schema: "
-            '{"decision":"accept|retry","chosen_pmid":"...","confidence":0.0,"reason":"...",'
+            '{"decision":"accept|retry","chosen_pmids":["..."],"confidence":0.0,"reason":"...",'
             '"improved_query":"..."}. '
-            "Accept only when one listed result clearly supports the sentence. "
+            f"Accept only when one or more listed results clearly support the sentence. Choose 1 to {MAX_ARTICLES_PER_SENTENCE} PMIDs only. "
+            "Prefer the smallest sufficient set. Multiple PMIDs are allowed when they are all directly relevant. "
             "If results are weak, off-topic, too broad, or missing, set decision to retry and give a better "
-            "English PubMed-style query. chosen_pmid must be empty when decision is retry."
+            "English PubMed-style query. chosen_pmids must be an empty array when decision is retry."
         )
         user_prompt = (
             f"Sentence: {sentence.text}\n"
@@ -403,11 +529,17 @@ def format_search_results(results: list[PubMedArticle]) -> str:
     for index, article in enumerate(results, start=1):
         authors = ", ".join(article.authors[:4]) if article.authors else "Unknown authors"
         abstract = article.abstract[:900].replace("\n", " ").strip()
+        impact_factor_line = (
+            f"Impact Factor: {article.impact_factor:.3f} ({article.impact_factor_source})\n"
+            if article.impact_factor is not None
+            else ""
+        )
         lines.append(
             f"{index}. PMID={article.pmid}\n"
             f"Title: {article.title}\n"
             f"Journal: {article.journal}\n"
             f"Year: {article.year}\n"
+            f"{impact_factor_line}"
             f"Authors: {authors}\n"
             f"Abstract: {abstract or 'No abstract available.'}\n"
         )
@@ -437,6 +569,167 @@ def mutate_query(current_query: str, sentence_text: str, attempt_index: int) -> 
     return current_query
 
 
+def _normalize_selected_pmids(response: dict[str, Any], results: list[PubMedArticle]) -> list[str]:
+    valid_pmids = {article.pmid for article in results}
+    ordered_result_pmids = [article.pmid for article in results]
+
+    raw_pmids = response.get("chosen_pmids")
+    values: list[str] = []
+    if isinstance(raw_pmids, list):
+        values.extend(str(item or "").strip() for item in raw_pmids)
+    else:
+        single = str(response.get("chosen_pmid", "")).strip()
+        if single:
+            values.append(single)
+
+    seen: set[str] = set()
+    selected = []
+    for pmid in ordered_result_pmids:
+        if pmid not in valid_pmids:
+            continue
+        if pmid not in values:
+            continue
+        if pmid in seen:
+            continue
+        seen.add(pmid)
+        selected.append(pmid)
+        if len(selected) >= MAX_ARTICLES_PER_SENTENCE:
+            break
+    return selected
+
+
+def _normalize_existing_references(references: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    used_markers: set[int] = set()
+    used_pmids: set[str] = set()
+
+    for item in sorted(references, key=lambda value: int(value.get("marker", 0) or 0)):
+        if not isinstance(item, dict):
+            continue
+        try:
+            marker = int(item.get("marker"))
+        except Exception:  # noqa: BLE001
+            continue
+        if marker <= 0 or marker in used_markers:
+            continue
+        article = item.get("article", {})
+        if not isinstance(article, dict):
+            continue
+        pmid = str(article.get("pmid", "")).strip()
+        if not pmid or pmid in used_pmids:
+            continue
+        used_markers.add(marker)
+        used_pmids.add(pmid)
+        normalized.append(
+            {
+                "marker": marker,
+                "article": article,
+                "reference_line": str(item.get("reference_line", "")).strip() or _fallback_reference_line(marker, article),
+            }
+        )
+    return normalized
+
+
+def _normalize_existing_placements(
+    placements: list[dict[str, Any]],
+    *,
+    sentences: list[SentenceChunk],
+    valid_markers: set[int],
+) -> list[dict[str, Any]]:
+    sentence_map = {sentence.sentence_id: sentence for sentence in sentences}
+    normalized: list[dict[str, Any]] = []
+    used_sentence_ids: set[int] = set()
+
+    for item in placements:
+        if not isinstance(item, dict):
+            continue
+        try:
+            sentence_id = int(item.get("sentence_id"))
+        except Exception:  # noqa: BLE001
+            continue
+        if sentence_id in used_sentence_ids:
+            continue
+        sentence = sentence_map.get(sentence_id)
+        if sentence is None:
+            continue
+        sentence_text = str(item.get("sentence_text", "")).strip()
+        if sentence_text and sentence_text != sentence.text:
+            continue
+
+        markers = item.get("markers")
+        if not isinstance(markers, list):
+            markers = [item.get("marker")]
+        normalized_markers: list[int] = []
+        seen_markers: set[int] = set()
+        for marker_value in markers:
+            try:
+                marker = int(marker_value)
+            except Exception:  # noqa: BLE001
+                continue
+            if marker <= 0 or marker not in valid_markers or marker in seen_markers:
+                continue
+            seen_markers.add(marker)
+            normalized_markers.append(marker)
+        if not normalized_markers:
+            continue
+
+        articles = item.get("articles")
+        if not isinstance(articles, list) or not articles:
+            article = item.get("article")
+            articles = [article] if isinstance(article, dict) else []
+        normalized_articles = [article for article in articles if isinstance(article, dict)]
+        if not normalized_articles:
+            normalized_articles = [{} for _ in normalized_markers]
+
+        normalized.append(
+            {
+                "marker": normalized_markers[0],
+                "markers": normalized_markers,
+                "sentence_id": sentence_id,
+                "sentence_text": sentence.text,
+                "claim_summary": str(item.get("claim_summary", "")).strip(),
+                "reason": str(item.get("reason", "")).strip(),
+                "final_query": str(item.get("final_query", "")).strip(),
+                "article": normalized_articles[0],
+                "articles": normalized_articles,
+                "attempts": item.get("attempts", []) if isinstance(item.get("attempts"), list) else [],
+            }
+        )
+        used_sentence_ids.add(sentence_id)
+    return normalized
+
+
+def _fallback_reference_line(marker: int, article: dict[str, Any]) -> str:
+    title = str(article.get("title", "")).strip()
+    pmid = str(article.get("pmid", "")).strip()
+    if title:
+        return f"[{marker}] {title}."
+    if pmid:
+        return f"[{marker}] PMID:{pmid}."
+    return f"[{marker}]"
+
+
+def _minimum_publication_year(recent_years: int | None) -> int | None:
+    if recent_years is None or recent_years <= 0:
+        return None
+    current_year = datetime.now().year
+    return max(1900, current_year - recent_years + 1)
+
+
+def _parse_year_value(value: str) -> int | None:
+    match = re.search(r"(19|20)\d{2}", str(value or ""))
+    if not match:
+        return None
+    return int(match.group(0))
+
+
+def _raw_results_limit(results_per_query: int, search_filters: SearchFilters) -> int:
+    if not search_filters.has_any_filter():
+        return results_per_query
+    multiplier = 4 if search_filters.has_impact_factor_filter() else 2
+    return max(results_per_query, min(60, results_per_query * multiplier))
+
+
 def insert_markers(text: str, sentences: list[SentenceChunk], placements: list[dict[str, Any]]) -> str:
     if not placements:
         return text
@@ -454,7 +747,9 @@ def insert_markers(text: str, sentences: list[SentenceChunk], placements: list[d
         if sentence is None:
             continue
         insert_at = _marker_insert_position(text, sentence.start, sentence.end)
-        insertions.append((insert_at, f"[{placement['marker']}]"))
+        markers = placement.get("markers") or [placement["marker"]]
+        marker_text = "[" + ", ".join(str(marker) for marker in markers) + "]"
+        insertions.append((insert_at, marker_text))
 
     rendered = text
     for position, marker in sorted(insertions, key=lambda item: item[0], reverse=True):

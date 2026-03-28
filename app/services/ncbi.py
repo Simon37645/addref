@@ -35,6 +35,9 @@ class PubMedArticle:
     pages: str
     doi: str
     authors: list[str]
+    issn: str = ""
+    impact_factor: float | None = None
+    impact_factor_source: str = ""
 
     def to_brief_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -90,10 +93,16 @@ class NCBIClient:
             }
         )
 
-    def search_pubmed(self, query: str, retmax: int = 8) -> list[PubMedArticle]:
+    def search_pubmed(
+        self,
+        query: str,
+        retmax: int = 8,
+        *,
+        min_publication_year: int | None = None,
+    ) -> list[PubMedArticle]:
         params = {
             "db": "pubmed",
-            "term": query,
+            "term": _build_pubmed_term(query, min_publication_year=min_publication_year),
             "retmode": "json",
             "retmax": str(retmax),
             "sort": "relevance",
@@ -241,6 +250,10 @@ def _parse_pubmed_article(node: ET.Element) -> PubMedArticle | None:
     year = _extract_year(node)
     doi = _extract_doi(node)
     authors = _extract_authors(node)
+    issn = (
+        _collapse_space(_text(node.find("./MedlineCitation/MedlineJournalInfo/ISSNLinking")))
+        or _collapse_space(_text(node.find("./MedlineCitation/Article/Journal/ISSN")))
+    )
 
     return PubMedArticle(
         pmid=pmid,
@@ -253,6 +266,7 @@ def _parse_pubmed_article(node: ET.Element) -> PubMedArticle | None:
         pages=pages,
         doi=doi,
         authors=authors,
+        issn=issn,
     )
 
 
@@ -295,6 +309,13 @@ def _extract_year(node: ET.Element) -> str:
         if match:
             return match.group(0)
     return ""
+
+
+def _build_pubmed_term(query: str, *, min_publication_year: int | None = None) -> str:
+    base_query = (query or "").strip() or "biomedical evidence"
+    if min_publication_year is None:
+        return base_query
+    return f"({base_query}) AND {int(min_publication_year)}:3000[pdat]"
 
 
 def _extract_doi(node: ET.Element) -> str:

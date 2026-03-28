@@ -6,6 +6,8 @@ const els = {
   sourceText: document.getElementById("source-text"),
   runButton: document.getElementById("run-button"),
   runButtonBottom: document.getElementById("run-button-bottom"),
+  continueButton: document.getElementById("continue-button"),
+  continueButtonBottom: document.getElementById("continue-button-bottom"),
   clearText: document.getElementById("clear-text"),
   fillSample: document.getElementById("fill-sample"),
   statusBadge: document.getElementById("status-badge"),
@@ -53,8 +55,10 @@ async function initialize() {
 
 function wireEvents() {
   els.sourceText.addEventListener("input", persistDraft);
-  els.runButton.addEventListener("click", runCitationFlow);
-  els.runButtonBottom.addEventListener("click", runCitationFlow);
+  els.runButton.addEventListener("click", () => runCitationFlow({ continueExisting: false }));
+  els.runButtonBottom.addEventListener("click", () => runCitationFlow({ continueExisting: false }));
+  els.continueButton.addEventListener("click", () => runCitationFlow({ continueExisting: true }));
+  els.continueButtonBottom.addEventListener("click", () => runCitationFlow({ continueExisting: true }));
   els.clearText.addEventListener("click", clearDraft);
   els.fillSample.addEventListener("click", fillSampleText);
   els.copyResult.addEventListener("click", copyAnnotatedText);
@@ -114,7 +118,7 @@ function fillSampleText() {
   persistDraft();
 }
 
-async function runCitationFlow() {
+async function runCitationFlow({ continueExisting = false } = {}) {
   if (state.running) {
     return;
   }
@@ -125,15 +129,21 @@ async function runCitationFlow() {
     return;
   }
 
+  if (continueExisting) {
+    ensureContinueAvailable();
+  }
+
   persistDraft();
   state.running = true;
   state.currentJobId = "";
-  state.result = null;
-  clearStoredJobId();
-  renderResult(null);
+  if (!continueExisting) {
+    state.result = null;
+    clearStoredJobId();
+    renderResult(null);
+  }
   renderProgress(null);
   setStatus("准备中", "running");
-  setMessage("任务提交中。", "success");
+  setMessage(continueExisting ? "继续添加任务提交中。" : "任务提交中。", "success");
   toggleActionState(true);
 
   try {
@@ -142,23 +152,7 @@ async function runCitationFlow() {
     if (budgetError) {
       throw new Error(budgetError);
     }
-    const payload = {
-      text: els.sourceText.value,
-      openai: {
-        base_url: config.baseUrl,
-        api_key: config.openaiKey,
-        model: config.model,
-        api_mode: config.apiMode,
-      },
-      ncbi: {
-        api_key: config.ncbiKey,
-        email: config.ncbiEmail,
-        disable_defaults: Boolean(config.disableDefaultNcbi),
-      },
-      max_targets: Number.parseInt(config.maxTargets, 10),
-      results_per_query: Number.parseInt(config.resultsPerQuery, 10),
-      max_attempts: Number.parseInt(config.maxAttempts, 10),
-    };
+    const payload = buildCitationPayload(config, { continueExisting });
 
     const response = await fetch("/api/cite-jobs", {
       method: "POST",
@@ -179,7 +173,7 @@ async function runCitationFlow() {
     storeJobId(state.currentJobId);
     renderProgress(data);
     setStatus("处理中 0%", "running");
-    setMessage(data.message || "任务已创建。", "success");
+    setMessage(data.message || (continueExisting ? "继续添加任务已创建。" : "任务已创建。"), "success");
     await pollCitationJob(state.currentJobId);
   } catch (error) {
     setStatus("出错", "error");
@@ -215,10 +209,7 @@ async function pollCitationJob(jobId) {
       renderResult(result);
       state.running = false;
       setStatus("完成", "done");
-      setMessage(
-        `已完成。插入 ${(result?.placements || []).length} 处，生成 ${(result?.references || []).length} 条。`,
-        "success"
-      );
+      setMessage(buildCompletionMessage(result), "success");
       if (result && result.usage) {
         state.session.usage = result.usage;
         window.AddRefSessionClient.applySessionChrome(state.session, els);
@@ -362,6 +353,9 @@ async function fetchLatestCitationJob() {
 function toggleActionState(running) {
   els.runButton.disabled = running;
   els.runButtonBottom.disabled = running;
+  const canContinue = !running && hasContinueCandidate();
+  els.continueButton.disabled = !canContinue;
+  els.continueButtonBottom.disabled = !canContinue;
   const hasResult = Boolean(state.result && state.result.references && state.result.references.length);
   els.copyResult.disabled = running || !hasResult;
   els.exportSelected.disabled = running || !hasResult;
@@ -415,7 +409,9 @@ function renderReferences(result) {
       const article = reference.article || {};
       const marker = reference.marker;
       const authors = Array.isArray(article.authors) ? article.authors.join(", ") : "";
-      const journalLine = [article.journal, article.year].filter(Boolean).join(" · ");
+      const impactFactor =
+        typeof article.impact_factor === "number" ? `IF ${article.impact_factor.toFixed(3)}` : "";
+      const journalLine = [article.journal, article.year, impactFactor].filter(Boolean).join(" · ");
       const doi = article.doi ? `<span>DOI ${escapeHtml(article.doi)}</span>` : "";
       const url = article.pubmed_url
         ? `<a href="${escapeHtml(article.pubmed_url)}" target="_blank" rel="noreferrer">PubMed</a>`
@@ -449,18 +445,26 @@ function renderTrace(result) {
   }
 
   const placementCards = (result.placements || []).map((placement) => {
-    const article = placement.article || {};
+    const articles = Array.isArray(placement.articles) && placement.articles.length
+      ? placement.articles
+      : (placement.article ? [placement.article] : []);
+    const markerLabel = formatMarkerLabel(placement.markers || placement.marker || []);
+    const articleSummary = articles.length
+      ? articles
+          .map((article) => `文献：${escapeHtml(article.title || "未命中标题")}（PMID ${escapeHtml(article.pmid || "-")}）`)
+          .join("<br>")
+      : "文献：未命中文献";
     const attempts = renderAttempts(placement.attempts || []);
     return `
       <article class="trace-card">
         <header>
           <div>
-            <h3>命中句子 [${placement.marker}]</h3>
+            <h3>命中句子 ${escapeHtml(markerLabel)}</h3>
             <p>${escapeHtml(placement.sentence_text || "")}</p>
           </div>
           <span class="attempt-pill">${escapeHtml(placement.final_query || "")}</span>
         </header>
-        <p>文献：${escapeHtml(article.title || "未命中标题")}（PMID ${escapeHtml(article.pmid || "-")}）</p>
+        <p>${articleSummary}</p>
         <details>
           <summary>查看检索迭代</summary>
           <div class="attempt-list">${attempts}</div>
@@ -569,6 +573,9 @@ function renderAttempts(attempts) {
           <h4>第 ${attempt.attempt} 轮 · ${escapeHtml(attempt.decision || "retry")}</h4>
           <p><strong>Query:</strong> ${escapeHtml(attempt.query || "")}</p>
           <p><strong>结果数:</strong> ${escapeHtml(String(attempt.result_count || 0))}</p>
+          <p><strong>原始命中:</strong> ${escapeHtml(String(attempt.raw_result_count || attempt.result_count || 0))}</p>
+          <p><strong>过滤剔除:</strong> ${escapeHtml(String(attempt.filtered_out_count || 0))}</p>
+          <p><strong>命中文献:</strong> ${escapeHtml(formatChosenPmids(attempt))}</p>
           <p><strong>判断:</strong> ${escapeHtml(attempt.reason || "")}</p>
           <p><strong>Top Results:</strong><br>${topResults || "无"}</p>
         </div>
@@ -637,7 +644,95 @@ function getSelectedReferences() {
 
 function highlightMarkers(text) {
   const escaped = escapeHtml(text);
-  return escaped.replace(/\[(\d+)\]/g, '<span class="ref-marker">[$1]</span>');
+  return escaped.replace(/\[(\d+(?:\s*,\s*\d+)*)\]/g, '<span class="ref-marker">[$1]</span>');
+}
+
+function formatMarkerLabel(markers) {
+  const normalized = Array.isArray(markers)
+    ? markers
+    : [markers];
+  const values = normalized
+    .map((item) => Number.parseInt(String(item || "0"), 10))
+    .filter((item) => Number.isFinite(item) && item > 0);
+  if (!values.length) {
+    return "[?]";
+  }
+  return `[${values.join(", ")}]`;
+}
+
+function formatChosenPmids(attempt) {
+  const chosen = Array.isArray(attempt.chosen_pmids) ? attempt.chosen_pmids : [];
+  if (chosen.length) {
+    return chosen.join(", ");
+  }
+  return attempt.chosen_pmid || "-";
+}
+
+function buildCitationPayload(config, { continueExisting }) {
+  const text = continueExisting ? getContinueSourceText() : els.sourceText.value;
+  return {
+    text,
+    openai: {
+      base_url: config.baseUrl,
+      api_key: config.openaiKey,
+      model: config.model,
+      api_mode: config.apiMode,
+    },
+    ncbi: {
+      api_key: config.ncbiKey,
+      email: config.ncbiEmail,
+      disable_defaults: Boolean(config.disableDefaultNcbi),
+    },
+    max_targets: Number.parseInt(config.maxTargets, 10),
+    results_per_query: Number.parseInt(config.resultsPerQuery, 10),
+    max_attempts: Number.parseInt(config.maxAttempts, 10),
+    recent_years: config.recentYears ? Number.parseInt(config.recentYears, 10) : "",
+    impact_factor_min: config.impactFactorMin ? Number.parseFloat(config.impactFactorMin) : "",
+    impact_factor_max: config.impactFactorMax ? Number.parseFloat(config.impactFactorMax) : "",
+    existing_references: continueExisting ? (state.result?.references || []) : [],
+    existing_placements: continueExisting ? (state.result?.placements || []) : [],
+  };
+}
+
+function hasContinueCandidate() {
+  if (!state.result) {
+    return false;
+  }
+  const sentenceCount = Number.parseInt(state.result.sentence_count || 0, 10) || 0;
+  const placementCount = Array.isArray(state.result.placements) ? state.result.placements.length : 0;
+  return sentenceCount > placementCount;
+}
+
+function ensureContinueAvailable() {
+  if (!state.result) {
+    throw new Error("请先完成一次处理。");
+  }
+  if (!hasContinueCandidate()) {
+    throw new Error("当前正文里没有可继续添加文献的句子。");
+  }
+  const currentText = (els.sourceText.value || "").trim();
+  const sourceText = getContinueSourceText().trim();
+  if (currentText && sourceText && currentText !== sourceText) {
+    throw new Error("正文已修改。继续添加只能基于上一次处理的同一份正文，请重新开始处理。");
+  }
+}
+
+function getContinueSourceText() {
+  return state.result?.source_text || els.sourceText.value || "";
+}
+
+function buildCompletionMessage(result) {
+  const totalPlacements = (result?.placements || []).length;
+  const totalReferences = (result?.references || []).length;
+  const newPlacements = Number.parseInt(result?.new_placement_count || 0, 10) || 0;
+  const newReferences = Number.parseInt(result?.new_reference_count || 0, 10) || 0;
+  if (result?.continued_from_existing) {
+    if (newPlacements <= 0) {
+      return `已完成。本轮未新增文献，当前共 ${totalPlacements} 处、${totalReferences} 条。`;
+    }
+    return `已完成。本轮新增 ${newPlacements} 处、${newReferences} 条；当前共 ${totalPlacements} 处、${totalReferences} 条。`;
+  }
+  return `已完成。插入 ${totalPlacements} 处，生成 ${totalReferences} 条。`;
 }
 
 function escapeHtml(value) {
@@ -655,6 +750,31 @@ function validateRunBudget(config) {
   const maxAttempts = Number.parseInt(config.maxAttempts, 10) || 10;
   if (maxTargets * resultsPerQuery * maxAttempts > 8000) {
     return "插入条数、每轮结果数、最大轮次的乘积不能超过 8000。";
+  }
+  if (config.recentYears) {
+    const parsedRecentYears = Number.parseInt(config.recentYears, 10);
+    if (!Number.isFinite(parsedRecentYears) || parsedRecentYears < 1 || parsedRecentYears > 50) {
+      return "近 n 年需填写 1 到 50 之间的整数。";
+    }
+  }
+  if (config.impactFactorMin) {
+    const parsedMin = Number.parseFloat(config.impactFactorMin);
+    if (!Number.isFinite(parsedMin) || parsedMin < 0 || parsedMin > 500) {
+      return "IF 最小值需填写 0 到 500 之间的数字。";
+    }
+  }
+  if (config.impactFactorMax) {
+    const parsedMax = Number.parseFloat(config.impactFactorMax);
+    if (!Number.isFinite(parsedMax) || parsedMax < 0 || parsedMax > 500) {
+      return "IF 最大值需填写 0 到 500 之间的数字。";
+    }
+  }
+  if (config.impactFactorMin && config.impactFactorMax) {
+    const parsedMin = Number.parseFloat(config.impactFactorMin);
+    const parsedMax = Number.parseFloat(config.impactFactorMax);
+    if (parsedMin > parsedMax) {
+      return "IF 最小值不能大于最大值。";
+    }
   }
   return "";
 }

@@ -9,6 +9,9 @@ const els = {
   maxTargets: document.getElementById("max-targets"),
   resultsPerQuery: document.getElementById("results-per-query"),
   maxAttempts: document.getElementById("max-attempts"),
+  recentYears: document.getElementById("recent-years"),
+  impactFactorMin: document.getElementById("impact-factor-min"),
+  impactFactorMax: document.getElementById("impact-factor-max"),
   saveSettings: document.getElementById("save-settings"),
   testModel: document.getElementById("test-model"),
   clearSettings: document.getElementById("clear-settings"),
@@ -71,6 +74,9 @@ function hydrateForm() {
   els.maxTargets.value = config.maxTargets || "4";
   els.resultsPerQuery.value = config.resultsPerQuery || "6";
   els.maxAttempts.value = config.maxAttempts || "10";
+  els.recentYears.value = config.recentYears || "";
+  els.impactFactorMin.value = config.impactFactorMin || "";
+  els.impactFactorMax.value = config.impactFactorMax || "";
 }
 
 function collectFormConfig() {
@@ -85,6 +91,9 @@ function collectFormConfig() {
     maxTargets: els.maxTargets.value.trim() || "4",
     resultsPerQuery: els.resultsPerQuery.value.trim() || "6",
     maxAttempts: els.maxAttempts.value.trim() || "10",
+    recentYears: els.recentYears.value.trim(),
+    impactFactorMin: els.impactFactorMin.value.trim(),
+    impactFactorMax: els.impactFactorMax.value.trim(),
   };
 }
 
@@ -219,6 +228,34 @@ function validateRunBudget(config) {
   const maxAttempts = Number.parseInt(config.maxAttempts, 10) || 10;
   if (maxTargets * resultsPerQuery * maxAttempts > 8000) {
     return "插入条数、每轮结果数、最大轮次的乘积不能超过 8000。";
+  }
+  const recentYears = config.recentYears.trim();
+  if (recentYears) {
+    const parsedRecentYears = Number.parseInt(recentYears, 10);
+    if (!Number.isFinite(parsedRecentYears) || parsedRecentYears < 1 || parsedRecentYears > 50) {
+      return "近 n 年需填写 1 到 50 之间的整数。";
+    }
+  }
+  const impactFactorMin = config.impactFactorMin.trim();
+  const impactFactorMax = config.impactFactorMax.trim();
+  if (impactFactorMin) {
+    const parsedMin = Number.parseFloat(impactFactorMin);
+    if (!Number.isFinite(parsedMin) || parsedMin < 0 || parsedMin > 500) {
+      return "IF 最小值需填写 0 到 500 之间的数字。";
+    }
+  }
+  if (impactFactorMax) {
+    const parsedMax = Number.parseFloat(impactFactorMax);
+    if (!Number.isFinite(parsedMax) || parsedMax < 0 || parsedMax > 500) {
+      return "IF 最大值需填写 0 到 500 之间的数字。";
+    }
+  }
+  if (impactFactorMin && impactFactorMax) {
+    const parsedMin = Number.parseFloat(impactFactorMin);
+    const parsedMax = Number.parseFloat(impactFactorMax);
+    if (parsedMin > parsedMax) {
+      return "IF 最小值不能大于最大值。";
+    }
   }
   return "";
 }

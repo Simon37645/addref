@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from app.services.citation_jobs import CitationJobStore
-from app.services.citation_pipeline import CitationPipeline, CitationPipelineError
+from app.services.citation_pipeline import CitationPipeline, CitationPipelineError, SearchFilters
 from app.services.mailer import (
     MailDeliveryError,
     ResendMailer,
@@ -23,6 +23,7 @@ from app.services.mailer import (
     SMTPSettings,
 )
 from app.services.ncbi import NCBIClient, NCBIError
+from app.services.openalex import OpenAlexClient, OpenAlexError, OpenAlexSettings
 from app.services.openai_compat import OpenAICompatClient, OpenAICompatError, OpenAISettings
 from app.services.user_store import (
     AuthenticationError,
@@ -295,6 +296,7 @@ class AddRefHandler(BaseHTTPRequestHandler):
             CitationPipelineError,
             OpenAICompatError,
             NCBIError,
+            OpenAlexError,
             UsagePolicyError,
             ValueError,
         ) as exc:
@@ -326,6 +328,7 @@ class AddRefHandler(BaseHTTPRequestHandler):
             CitationPipelineError,
             OpenAICompatError,
             NCBIError,
+            OpenAlexError,
             UsagePolicyError,
             ValueError,
         ) as exc:
@@ -609,6 +612,9 @@ def _prepare_citation_request(*, payload: dict[str, Any], user_context: dict[str
     openai_config = merged["openai"]
     ncbi_config = merged["ncbi"]
     max_targets, max_attempts, results_per_query = _resolve_pipeline_limits(payload)
+    search_filters = _resolve_search_filters(payload)
+    existing_references = _normalize_json_list(payload.get("existing_references"))
+    existing_placements = _normalize_json_list(payload.get("existing_placements"))
 
     required_openai = {
         "base_url": "OpenAI 兼容接口 Base URL",
@@ -627,6 +633,9 @@ def _prepare_citation_request(*, payload: dict[str, Any], user_context: dict[str
         "max_targets": max_targets,
         "max_attempts": max_attempts,
         "results_per_query": results_per_query,
+        "search_filters": search_filters,
+        "existing_references": existing_references,
+        "existing_placements": existing_placements,
     }
 
 
@@ -654,15 +663,23 @@ def _execute_citation_request(
         email=str(ncbi_config.get("email", "")).strip(),
     )
 
-    pipeline = CitationPipeline(llm=llm, ncbi=ncbi)
+    openalex = None
+    search_filters: SearchFilters = prepared["search_filters"]
+    if search_filters.has_impact_factor_filter():
+        openalex = OpenAlexClient(_load_openalex_settings())
+
+    pipeline = CitationPipeline(llm=llm, ncbi=ncbi, openalex=openalex)
     result = pipeline.run(
         text=text,
         max_targets=int(prepared["max_targets"]),
         max_attempts=int(prepared["max_attempts"]),
         results_per_query=int(prepared["results_per_query"]),
+        search_filters=search_filters,
+        existing_references=prepared["existing_references"],
+        existing_placements=prepared["existing_placements"],
         progress_callback=progress_callback,
     )
-    citation_success = bool(result.get("placements"))
+    citation_success = bool(int(result.get("new_placement_count", 0) or 0))
 
     if policy["count_default_usage"]:
         record_usage(
@@ -717,6 +734,7 @@ def _run_citation_job_worker(
         CitationPipelineError,
         OpenAICompatError,
         NCBIError,
+        OpenAlexError,
         UsagePolicyError,
         ValueError,
     ) as exc:
@@ -905,6 +923,10 @@ def _load_auth_defaults() -> dict[str, Any]:
             "sender_name": "AddRef",
             "use_ssl": True,
         },
+        "openalex": {
+            "api_key": "",
+            "email": "",
+        },
         "resend": {
             "api_key": "",
             "sender_email": "",
@@ -936,6 +958,8 @@ def _load_auth_defaults() -> dict[str, Any]:
     defaults["openai"]["api_mode"] = str(data.get("api_mode", "")).strip()
     defaults["ncbi"]["api_key"] = str(data.get("NCBI_APIkey", "")).strip()
     defaults["ncbi"]["email"] = str(data.get("NCBI_email", "")).strip()
+    defaults["openalex"]["api_key"] = str(data.get("OPENALEX_APIkey", "")).strip()
+    defaults["openalex"]["email"] = str(data.get("OPENALEX_email", "")).strip()
     defaults["mail"]["smtp_host"] = str(data.get("MAIL_SMTP_HOST") or "smtp.qiye.aliyun.com").strip()
     defaults["mail"]["smtp_port"] = _clamp_int(data.get("MAIL_SMTP_PORT"), default=465, minimum=1, maximum=65535)
     defaults["mail"]["username"] = str(
@@ -1066,6 +1090,18 @@ def _load_resend_settings() -> ResendSettings:
         sender_email=str(resend["sender_email"]).strip(),
         sender_name=str(resend.get("sender_name", "AddRef")).strip() or "AddRef",
         api_base_url=str(resend.get("api_base_url", "https://api.resend.com")).strip() or "https://api.resend.com",
+    )
+
+
+def _load_openalex_settings() -> OpenAlexSettings:
+    defaults = _load_auth_defaults()
+    openalex = defaults["openalex"]
+    api_key = str(openalex.get("api_key", "")).strip()
+    if not api_key:
+        raise ValueError("使用 IF 区间过滤前，请先在 auth.json 配置 OPENALEX_APIkey。")
+    return OpenAlexSettings(
+        api_key=api_key,
+        email=str(openalex.get("email", "")).strip(),
     )
 
 
@@ -1245,6 +1281,45 @@ def _resolve_pipeline_limits(payload: dict[str, Any]) -> tuple[int, int, int]:
     if max_targets * max_attempts * results_per_query > 8000:
         raise ValueError("插入条数、每轮结果数、最大轮次的乘积不能超过 8000。")
     return max_targets, max_attempts, results_per_query
+
+
+def _resolve_search_filters(payload: dict[str, Any]) -> SearchFilters:
+    recent_years = _optional_clamp_int(payload.get("recent_years"), minimum=1, maximum=50)
+    impact_factor_min = _optional_clamp_float(payload.get("impact_factor_min"), minimum=0, maximum=500)
+    impact_factor_max = _optional_clamp_float(payload.get("impact_factor_max"), minimum=0, maximum=500)
+    if (
+        impact_factor_min is not None
+        and impact_factor_max is not None
+        and impact_factor_min > impact_factor_max
+    ):
+        raise ValueError("IF 最小值不能大于最大值。")
+    return SearchFilters(
+        recent_years=recent_years,
+        impact_factor_min=impact_factor_min,
+        impact_factor_max=impact_factor_max,
+    )
+
+
+def _optional_clamp_int(value: Any, *, minimum: int, maximum: int) -> int | None:
+    if str(value or "").strip() == "":
+        return None
+    return _clamp_int(value, default=minimum, minimum=minimum, maximum=maximum)
+
+
+def _optional_clamp_float(value: Any, *, minimum: float, maximum: float) -> float | None:
+    if str(value or "").strip() == "":
+        return None
+    try:
+        parsed = float(value)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError("请输入合法的 IF 数值。") from exc
+    return round(max(minimum, min(maximum, parsed)), 3)
+
+
+def _normalize_json_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
 
 
 def _ensure_owner_account() -> None:
