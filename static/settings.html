@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AddRef | Settings</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body class="app-settings">
+  <div class="canvas canvas-grid" aria-hidden="true"></div>
+  <div class="canvas canvas-glow-a" aria-hidden="true"></div>
+  <div class="canvas canvas-glow-b" aria-hidden="true"></div>
+
+  <header class="site-header">
+    <a class="brand-mark" href="/">
+      <span class="brand-box">AR</span>
+      <span class="brand-copy">
+        <strong>AddRef</strong>
+        <small>连接与检索设置</small>
+      </span>
+    </a>
+    <nav class="site-nav">
+      <a class="nav-link nav-link-strong" href="/">返回主页</a>
+      <span class="nav-user hidden" id="session-email"></span>
+      <a class="nav-link" href="/auth" id="auth-link">登录</a>
+      <button type="button" class="nav-link nav-button hidden" id="logout-button">退出</button>
+    </nav>
+  </header>
+
+  <main class="settings-page-shell">
+    <section class="panel settings-header-panel">
+      <div class="settings-header-main">
+        <div>
+          <span class="section-kicker">设置</span>
+          <h1>连接与检索</h1>
+        </div>
+        <div class="status-badge" id="test-status">待检测</div>
+      </div>
+      <div class="action-row">
+        <button type="button" class="primary-button" id="save-settings">保存</button>
+        <button type="button" class="ghost-button" id="test-model">检测模型连接</button>
+        <button type="button" class="ghost-button" id="clear-settings">清空</button>
+      </div>
+      <div class="message-strip" id="settings-message"></div>
+    </section>
+
+    <section class="settings-grid">
+      <article class="panel settings-card">
+        <div class="panel-head compact-head">
+          <div>
+            <span class="section-kicker">模型</span>
+            <h2>模型</h2>
+          </div>
+        </div>
+        <div class="settings-fields">
+          <label class="field">
+            <span>模型名</span>
+            <input id="model" type="text" placeholder="可留空">
+          </label>
+          <label class="field">
+            <span>OpenAI API Key</span>
+            <input id="openai-key" type="password" placeholder="可留空">
+          </label>
+        </div>
+      </article>
+
+      <article class="panel settings-card">
+        <div class="panel-head compact-head">
+          <div>
+            <span class="section-kicker">检索</span>
+            <h2>检索</h2>
+          </div>
+        </div>
+        <div class="settings-fields">
+          <label class="field">
+            <span>NCBI API Key</span>
+            <input id="ncbi-key" type="password" placeholder="可留空">
+          </label>
+          <label class="field">
+            <span>NCBI Email</span>
+            <input id="ncbi-email" type="email" placeholder="可留空">
+          </label>
+          <label class="toggle-line">
+            <input id="disable-default-ncbi" type="checkbox">
+            <span>不使用默认 NCBI</span>
+          </label>
+        </div>
+      </article>
+
+      <article class="panel settings-card">
+        <div class="panel-head compact-head">
+          <div>
+            <span class="section-kicker">范围</span>
+            <h2>范围</h2>
+          </div>
+        </div>
+        <p class="panel-copy">插入条数 × 每轮结果数 × 最大轮次需不超过 8000。</p>
+        <div class="numeric-grid">
+          <label class="field">
+            <span>插入条数</span>
+            <input id="max-targets" type="number" min="1" max="80" value="4">
+          </label>
+          <label class="field">
+            <span>每轮结果数</span>
+            <input id="results-per-query" type="number" min="3" max="20" value="6">
+          </label>
+          <label class="field">
+            <span>最大轮次</span>
+            <input id="max-attempts" type="number" min="1" max="20" value="10">
+          </label>
+        </div>
+      </article>
+
+      <article class="panel settings-card advanced-card">
+        <details class="advanced-panel">
+          <summary>高级设置</summary>
+          <div class="settings-fields top-gap">
+            <label class="field">
+              <span>Base URL</span>
+              <input id="base-url" type="url" placeholder="可留空">
+            </label>
+            <label class="field">
+              <span>API Mode</span>
+              <select id="api-mode">
+                <option value="auto">自动优先 chat/completions</option>
+                <option value="chat_completions">v1/chat/completions</option>
+                <option value="responses">v1/responses</option>
+              </select>
+            </label>
+          </div>
+          </details>
+        </article>
+
+      <article class="panel settings-card">
+        <div class="panel-head compact-head">
+          <div>
+            <span class="section-kicker">安全</span>
+            <h2>修改密码</h2>
+          </div>
+        </div>
+        <div class="settings-fields">
+          <label class="field">
+            <span>当前密码</span>
+            <input id="current-password" type="password" placeholder="输入当前密码">
+          </label>
+          <label class="field">
+            <span>新密码</span>
+            <input id="new-password" type="password" placeholder="至少 8 位">
+          </label>
+          <button type="button" class="ghost-button" id="change-password">更新密码</button>
+        </div>
+      </article>
+    </section>
+  </main>
+
+  <script src="/static/config-store.js"></script>
+  <script src="/static/session-client.js"></script>
+  <script src="/static/settings.js"></script>
+</body>
+</html>

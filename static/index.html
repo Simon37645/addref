@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AddRef | Workspace</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body class="app-home">
+  <div class="canvas canvas-grid" aria-hidden="true"></div>
+  <div class="canvas canvas-glow-a" aria-hidden="true"></div>
+  <div class="canvas canvas-glow-b" aria-hidden="true"></div>
+
+  <header class="site-header">
+    <a class="brand-mark" href="/">
+      <span class="brand-box">AR</span>
+      <span class="brand-copy">
+        <strong>AddRef</strong>
+        <small>文献插入工作台</small>
+      </span>
+    </a>
+    <nav class="site-nav">
+      <a class="nav-link" href="#results">结果</a>
+      <a class="nav-link nav-link-strong" href="/settings">设置</a>
+      <span class="nav-user hidden" id="session-email"></span>
+      <a class="nav-link" href="/auth" id="auth-link">登录</a>
+      <button type="button" class="nav-link nav-button hidden" id="logout-button">退出</button>
+    </nav>
+  </header>
+
+  <main class="workspace-shell">
+    <section class="workspace-grid">
+      <section class="panel studio-panel">
+        <div class="panel-head">
+          <div>
+            <span class="section-kicker">工作区</span>
+            <h1>文稿</h1>
+          </div>
+          <div class="status-badge" id="status-badge">等待运行</div>
+        </div>
+
+        <label class="field editor-field">
+          <span>正文</span>
+          <textarea id="source-text" placeholder="粘贴待处理文本"></textarea>
+        </label>
+
+        <div class="action-row">
+          <button type="button" class="primary-button" id="run-button-bottom">开始处理</button>
+          <button type="button" class="ghost-button" id="fill-sample">填充示例</button>
+          <button type="button" class="ghost-button" id="clear-text">清空</button>
+        </div>
+
+        <div class="message-strip" id="message-strip"></div>
+      </section>
+
+      <aside class="panel side-panel">
+        <div class="side-stack">
+          <div class="side-block">
+            <span class="section-kicker">操作</span>
+            <button type="button" class="primary-button primary-block" id="run-button">开始处理</button>
+          </div>
+
+          <div class="side-block">
+            <span class="section-kicker">入口</span>
+            <a class="secondary-link" href="/settings">打开设置页</a>
+          </div>
+
+          <div class="side-block">
+            <span class="section-kicker">账号</span>
+            <div class="account-card">
+              <strong id="account-email">未登录</strong>
+              <span id="account-usage">请先登录</span>
+            </div>
+          </div>
+
+          <div class="side-notes">
+            <div class="note-card">
+              <strong>正文</strong>
+              <span>输入待处理文本</span>
+            </div>
+            <div class="note-card">
+              <strong>结果</strong>
+              <span>查看编号与参考文献</span>
+            </div>
+            <div class="note-card">
+              <strong>导出</strong>
+              <span>导出 RIS</span>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </section>
+
+    <section class="panel progress-panel">
+      <div class="panel-head">
+        <div>
+          <span class="section-kicker">进度</span>
+          <h2>处理进程</h2>
+        </div>
+        <div class="progress-percent" id="progress-percent">0%</div>
+      </div>
+      <div class="progress-overview">
+        <div class="progress-track" aria-hidden="true">
+          <div class="progress-fill" id="progress-fill"></div>
+        </div>
+        <div class="progress-copy">
+          <strong id="progress-stage">等待开始</strong>
+          <span id="progress-detail">提交任务后显示实时进度</span>
+        </div>
+      </div>
+      <div id="progress-history" class="progress-history empty-state">提交任务后显示步骤记录</div>
+      <div class="progress-actions">
+        <button type="button" class="ghost-button compact-button hidden" id="progress-toggle">展开全部</button>
+      </div>
+    </section>
+
+    <section class="results-grid" id="results">
+      <article class="panel result-panel">
+        <div class="panel-head">
+          <div>
+            <span class="section-kicker">结果</span>
+            <h2>编号正文</h2>
+          </div>
+          <button type="button" class="ghost-button" id="copy-result" disabled>复制</button>
+        </div>
+        <pre id="annotated-text" class="output-box empty">运行后显示结果</pre>
+      </article>
+
+      <article class="panel result-panel">
+        <div class="panel-head">
+          <div>
+            <span class="section-kicker">参考文献</span>
+            <h2>参考文献</h2>
+          </div>
+          <div class="toolbar">
+            <button type="button" class="ghost-button" id="export-selected" disabled>导出已选</button>
+            <button type="button" class="primary-button compact" id="export-all" disabled>导出全部</button>
+          </div>
+        </div>
+        <div id="reference-list" class="reference-list empty-state">暂无参考文献</div>
+      </article>
+    </section>
+
+    <section class="panel trace-panel">
+      <div class="panel-head">
+        <div>
+          <span class="section-kicker">轨迹</span>
+          <h2>检索轨迹</h2>
+        </div>
+      </div>
+      <div id="trace-list" class="trace-list empty-state">运行后显示检索轨迹</div>
+    </section>
+  </main>
+
+  <script src="/static/config-store.js"></script>
+  <script src="/static/session-client.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

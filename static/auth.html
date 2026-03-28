@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AddRef | Auth</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body class="app-auth">
+  <div class="canvas canvas-grid" aria-hidden="true"></div>
+  <div class="canvas canvas-glow-a" aria-hidden="true"></div>
+  <div class="canvas canvas-glow-b" aria-hidden="true"></div>
+
+  <header class="site-header">
+    <a class="brand-mark" href="/">
+      <span class="brand-box">AR</span>
+      <span class="brand-copy">
+        <strong>AddRef</strong>
+        <small>邮箱注册与登录</small>
+      </span>
+    </a>
+    <nav class="site-nav">
+      <a class="nav-link nav-link-strong" href="/">返回主页</a>
+    </nav>
+  </header>
+
+  <main class="auth-shell">
+    <section class="panel auth-panel">
+      <div class="auth-grid">
+        <article class="auth-card">
+          <span class="section-kicker">注册</span>
+          <h1>注册</h1>
+          <p class="auth-copy">邮箱验证码有效期 10 分钟。</p>
+          <label class="field">
+            <span>邮箱</span>
+            <input id="register-email" type="email" placeholder="name@example.com">
+          </label>
+          <label class="field">
+            <span>验证码</span>
+            <div class="inline-field">
+              <input id="register-code" class="code-input" type="text" inputmode="numeric" maxlength="6" placeholder="6 位验证码">
+              <button type="button" class="ghost-button compact-button" id="send-register-code">发送验证码</button>
+            </div>
+          </label>
+          <label class="field">
+            <span>密码</span>
+            <input id="register-password" type="password" placeholder="至少 8 位">
+          </label>
+          <button type="button" class="primary-button" id="register-button">注册</button>
+        </article>
+
+        <article class="auth-card">
+          <span class="section-kicker">密码登录</span>
+          <h1>登录</h1>
+          <p class="auth-copy">注册完成后使用邮箱和密码登录。</p>
+          <label class="field">
+            <span>邮箱</span>
+            <input id="login-email" type="email" placeholder="name@example.com">
+          </label>
+          <label class="field">
+            <span>密码</span>
+            <input id="login-password" type="password" placeholder="输入密码">
+          </label>
+          <button type="button" class="primary-button" id="login-button">登录</button>
+        </article>
+
+        <article class="auth-card">
+          <span class="section-kicker">找回密码</span>
+          <h1>重置密码</h1>
+          <p class="auth-copy">通过邮箱验证码重设登录密码。</p>
+          <label class="field">
+            <span>邮箱</span>
+            <input id="reset-email" type="email" placeholder="name@example.com">
+          </label>
+          <label class="field">
+            <span>验证码</span>
+            <div class="inline-field">
+              <input id="reset-code" class="code-input" type="text" inputmode="numeric" maxlength="6" placeholder="6 位验证码">
+              <button type="button" class="ghost-button compact-button" id="send-reset-code">发送验证码</button>
+            </div>
+          </label>
+          <label class="field">
+            <span>新密码</span>
+            <input id="reset-password" type="password" placeholder="至少 8 位">
+          </label>
+          <button type="button" class="primary-button" id="reset-button">重置密码</button>
+        </article>
+      </div>
+      <div class="message-strip" id="auth-message"></div>
+    </section>
+  </main>
+
+  <script src="/static/auth.js"></script>
+</body>
+</html>

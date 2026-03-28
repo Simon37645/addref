@@ -1,0 +1,14 @@
+services:
+  addref:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: addref:latest
+    container_name: addref
+    restart: unless-stopped
+    ports:
+      - "14785:14785"
+    volumes:
+      - ./auth.json:/app/auth.json:ro
+      - ./data:/app/data
+

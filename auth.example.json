@@ -1,0 +1,22 @@
+{
+  "OWNER_email": "owner@example.com",
+  "OWNER_password": "change-this-password",
+  "MAIL_sender": "noreply@example.com",
+  "MAIL_account": "noreply@example.com",
+  "MAIL_password": "change-this-password",
+  "MAIL_SMTP_HOST": "smtp.example.com",
+  "MAIL_SMTP_PORT": 465,
+  "MAIL_sender_name": "AddRef",
+  "MAIL_use_ssl": true,
+  "RESEND_sender": "noreply@example.com",
+  "RESEND_sender_name": "AddRef",
+  "NCBI_email": "owner@example.com",
+  "NCBI_APIkey": "",
+  "OPENALEX_email": "owner@example.com",
+  "OPENALEX_APIkey": "",
+  "OPENAI_APIkey": "",
+  "OPENAI_base_url": "https://your-openai-compatible-host.example.com",
+  "model": "gpt-5.4",
+  "resend_APIkey": ""
+}
+
