@@ -68,6 +68,38 @@ http://127.0.0.1:14785
 
 如果需要 `systemd`，可以参考 [deploy/systemd/addref.service.example](deploy/systemd/addref.service.example)。
 
+## Owner 账号与首次登录
+
+AddRef 不带可直接使用的默认公开账号。
+
+首次启动前，请先编辑 `auth.json`，设置：
+
+- `OWNER_email`
+- `OWNER_password`
+
+示例：
+
+```json
+{
+  "OWNER_email": "admin@example.com",
+  "OWNER_password": "请改成强密码"
+}
+```
+
+规则如下：
+
+- 服务启动时会自动确保 `auth.json` 中配置的 owner 账号存在
+- 部署完成后，访问 `/auth`，用 `auth.json` 里的 `OWNER_email` 和 `OWNER_password` 登录
+- 普通用户需要通过邮箱验证码自行注册
+
+后续如果要修改 owner 登录信息：
+
+- 修改 `auth.json` 中的 `OWNER_email` 和/或 `OWNER_password`
+- 重启服务或容器
+- 使用新的 owner 账号信息重新登录
+
+不要直接使用示例配置中的默认值上线。
+
 ## Docker 部署
 
 先准备配置文件：
@@ -103,4 +135,3 @@ docker compose down
 - 必需版权声明见 [NOTICE](NOTICE)
 - 商业使用请联系 `yangzhuangqi@gmail.com`
 - 商用授权说明见 [COMMERCIAL_LICENSE.md](COMMERCIAL_LICENSE.md)
-

@@ -68,6 +68,38 @@ http://127.0.0.1:14785
 
 If you need `systemd`, see [deploy/systemd/addref.service.example](deploy/systemd/addref.service.example).
 
+## Owner Account and First Login
+
+AddRef does not ship with a built-in public default account.
+
+Before the first start, edit `auth.json` and set:
+
+- `OWNER_email`
+- `OWNER_password`
+
+Example:
+
+```json
+{
+  "OWNER_email": "admin@example.com",
+  "OWNER_password": "change-to-a-strong-password"
+}
+```
+
+How it works:
+
+- On startup, AddRef automatically ensures that the owner account from `auth.json` exists
+- Sign in from `/auth` with the `OWNER_email` and `OWNER_password` configured in `auth.json`
+- Regular users must register by email verification
+
+To change the owner login later:
+
+- Update `OWNER_email` and/or `OWNER_password` in `auth.json`
+- Restart the app or container
+- Sign in again with the new owner credentials
+
+Do not deploy with the example values unchanged.
+
 ## Docker Deployment
 
 Prepare the config and data directory first:
@@ -103,4 +135,3 @@ This project is source-available and is not released under an OSI open source li
 - Required notice is provided in [NOTICE](NOTICE)
 - Commercial use: `yangzhuangqi@gmail.com`
 - Commercial terms: [COMMERCIAL_LICENSE.md](COMMERCIAL_LICENSE.md)
-
