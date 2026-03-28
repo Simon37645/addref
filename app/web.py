@@ -55,7 +55,6 @@ DEFAULT_SERVICE_DAILY_LIMIT = 20
 DEFAULT_SERVICE_MAX_TEXT_LENGTH = 5000
 CITATION_JOB_STORE = CitationJobStore()
 MAX_CONCURRENT_CITATION_JOBS = 3
-OWNER_NOTIFICATION_EMAIL = "yangzhuangqi@gmail.com"
 _CITATION_QUEUE_CONDITION = threading.Condition()
 _CITATION_WAIT_QUEUE: deque[str] = deque()
 _CITATION_ACTIVE_JOB_IDS: set[str] = set()
@@ -1108,9 +1107,13 @@ def _notify_owner_new_user_async(new_user_email: str) -> None:
 
 def _send_owner_new_user_notification(*, new_user_email: str) -> None:
     try:
+        defaults = _load_auth_defaults()
+        recipient = _normalize_email(defaults["owner_email"])
+        if not recipient:
+            return
         subject, text_body, html_body = _build_owner_new_user_email(new_user_email=new_user_email)
         _build_mailer().send_html_mail(
-            recipient=OWNER_NOTIFICATION_EMAIL,
+            recipient=recipient,
             subject=subject,
             text_body=text_body,
             html_body=html_body,
