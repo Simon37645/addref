@@ -29,6 +29,9 @@ const els = {
   progressFill: document.getElementById("progress-fill"),
   progressHistory: document.getElementById("progress-history"),
   progressToggle: document.getElementById("progress-toggle"),
+  jobHistory: document.getElementById("job-history"),
+  historyRetention: document.getElementById("history-retention"),
+  refreshHistory: document.getElementById("refresh-history"),
 };
 
 const state = {
@@ -39,6 +42,8 @@ const state = {
   progressExpanded: false,
   progressJob: null,
   progressJobId: "",
+  jobHistory: [],
+  historyRetentionHours: 24,
 };
 
 initialize();
@@ -48,8 +53,10 @@ async function initialize() {
   wireEvents();
   renderResult(null);
   renderProgress(null);
+  renderJobHistory();
   toggleActionState(false);
   await Promise.all([fetchHealth(), refreshSession()]);
+  await refreshJobHistory();
   await restoreLastJob();
 }
 
@@ -66,6 +73,12 @@ function wireEvents() {
   els.exportAll.addEventListener("click", () => exportRis(false));
   els.logoutButton.addEventListener("click", handleLogout);
   els.progressToggle.addEventListener("click", toggleProgressHistory);
+  if (els.refreshHistory) {
+    els.refreshHistory.addEventListener("click", () => refreshJobHistory({ silent: false }));
+  }
+  if (els.jobHistory) {
+    els.jobHistory.addEventListener("click", handleJobHistoryClick);
+  }
 }
 
 async function fetchHealth() {
@@ -86,15 +99,30 @@ async function refreshSession() {
   } catch (error) {
     state.session = { authenticated: false };
   }
+  if (!state.session.authenticated) {
+    state.jobHistory = [];
+    state.historyRetentionHours = 24;
+    state.currentJobId = "";
+  }
   window.AddRefSessionClient.applySessionChrome(state.session, els);
+  renderJobHistory();
 }
 
 async function handleLogout() {
+  clearStoredJobId();
   await window.AddRefSessionClient.logout();
   state.session = { authenticated: false };
   state.running = false;
   state.currentJobId = "";
+  state.result = null;
+  state.progressJob = null;
+  state.progressJobId = "";
+  state.jobHistory = [];
+  state.historyRetentionHours = 24;
   window.AddRefSessionClient.applySessionChrome(state.session, els);
+  renderResult(null);
+  renderProgress(null);
+  renderJobHistory();
   setMessage("已退出登录。", "success");
 }
 
@@ -172,6 +200,7 @@ async function runCitationFlow({ continueExisting = false } = {}) {
     state.currentJobId = data.job_id || "";
     storeJobId(state.currentJobId);
     renderProgress(data);
+    upsertHistoryJob(data);
     setStatus("处理中 0%", "running");
     setMessage(data.message || (continueExisting ? "继续添加任务已创建。" : "任务已创建。"), "success");
     await pollCitationJob(state.currentJobId);
@@ -202,10 +231,12 @@ async function pollCitationJob(jobId) {
     }
 
     renderProgress(data);
+    upsertHistoryJob(data);
 
     if (data.status === "completed") {
       const result = data.result || null;
       state.result = result;
+      loadSourceTextFromJobResult(result);
       renderResult(result);
       state.running = false;
       setStatus("完成", "done");
@@ -271,38 +302,7 @@ async function restoreLastJob() {
       }
     }
 
-    state.currentJobId = jobId;
-    renderProgress(job);
-
-    if (job.status === "completed") {
-      const result = job.result || null;
-      state.result = result;
-      renderResult(result);
-      setStatus("完成", "done");
-      setMessage("已恢复上次任务结果。", "success");
-      if (result && result.usage) {
-        state.session.usage = result.usage;
-        window.AddRefSessionClient.applySessionChrome(state.session, els);
-      }
-      return;
-    }
-
-    if (job.status === "failed") {
-      setStatus("出错", "error");
-      setMessage(job.error || job.detail || "上次任务处理失败。", "error");
-      return;
-    }
-
-    state.running = true;
-    toggleActionState(true);
-    if (job.status === "queued") {
-      setStatus("排队中", "running");
-      setMessage(job.detail || "已恢复排队中的任务。", "success");
-    } else {
-      setStatus(`处理中 ${Number.parseInt(job.progress_percent || 0, 10) || 0}%`, "running");
-      setMessage("已恢复上次任务。", "success");
-    }
-    await pollCitationJob(jobId);
+    await activateLoadedJob(job, { source: "restore" });
   } catch (error) {
     clearStoredJobId();
     state.currentJobId = "";
@@ -316,6 +316,92 @@ async function restoreLastJob() {
     state.running = false;
     toggleActionState(false);
   }
+}
+
+async function handleJobHistoryClick(event) {
+  const trigger = event.target.closest(".job-history-item");
+  if (!trigger || trigger.disabled) {
+    return;
+  }
+  const jobId = trigger.dataset.jobId || "";
+  if (!jobId) {
+    return;
+  }
+  await openHistoryJob(jobId);
+}
+
+async function openHistoryJob(jobId) {
+  if (state.running) {
+    return;
+  }
+
+  try {
+    const job = await fetchCitationJob(jobId);
+    await activateLoadedJob(job, { source: "history" });
+  } catch (error) {
+    if (isNotFoundError(error)) {
+      await refreshJobHistory({ silent: true });
+      setMessage("该历史任务已过期。", "error");
+      return;
+    }
+    setMessage(error.message || "打开历史任务失败。", "error");
+  }
+}
+
+async function activateLoadedJob(job, { source = "history" } = {}) {
+  const jobId = job && job.job_id ? job.job_id : "";
+  if (!jobId) {
+    return;
+  }
+
+  state.currentJobId = jobId;
+  storeJobId(jobId);
+  renderProgress(job);
+  upsertHistoryJob(job);
+
+  if (job.status === "completed") {
+    state.running = false;
+    const result = job.result || null;
+    state.result = result;
+    loadSourceTextFromJobResult(result);
+    renderResult(result);
+    setStatus("完成", "done");
+    setMessage(source === "restore" ? "已恢复上次任务结果。" : "已打开历史任务。", "success");
+    if (result && result.usage) {
+      state.session.usage = result.usage;
+      window.AddRefSessionClient.applySessionChrome(state.session, els);
+    }
+    toggleActionState(false);
+    return;
+  }
+
+  if (job.status === "failed") {
+    state.running = false;
+    state.result = null;
+    renderResult(null);
+    setStatus("出错", "error");
+    setMessage(
+      source === "restore"
+        ? (job.error || job.detail || "上次任务处理失败。")
+        : (job.error || job.detail || "该历史任务处理失败。"),
+      "error"
+    );
+    toggleActionState(false);
+    return;
+  }
+
+  state.result = null;
+  renderResult(null);
+  state.running = true;
+  toggleActionState(true);
+  if (job.status === "queued") {
+    setStatus("排队中", "running");
+    setMessage(source === "restore" ? (job.detail || "已恢复排队中的任务。") : (job.detail || "已打开排队中的任务。"), "success");
+  } else {
+    setStatus(`处理中 ${Number.parseInt(job.progress_percent || 0, 10) || 0}%`, "running");
+    setMessage(source === "restore" ? "已恢复上次任务。" : "已打开进行中的任务。", "success");
+  }
+  await pollCitationJob(jobId);
 }
 
 async function fetchCitationJob(jobId) {
@@ -350,6 +436,41 @@ async function fetchLatestCitationJob() {
   return data;
 }
 
+async function fetchCitationJobHistory() {
+  const response = await fetch("/api/cite-jobs", {
+    credentials: "same-origin",
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    if (response.status === 401) {
+      await refreshSession();
+    }
+    const error = new Error(data.error || "无法获取历史任务。");
+    error.status = response.status;
+    throw error;
+  }
+  return data;
+}
+
+async function refreshJobHistory({ silent = true } = {}) {
+  if (!state.session.authenticated) {
+    state.jobHistory = [];
+    renderJobHistory();
+    return;
+  }
+
+  try {
+    const data = await fetchCitationJobHistory();
+    state.jobHistory = Array.isArray(data.jobs) ? data.jobs : [];
+    state.historyRetentionHours = Number.parseInt(data.retention_hours || 24, 10) || 24;
+    renderJobHistory();
+  } catch (error) {
+    if (!silent) {
+      setMessage(error.message || "刷新历史任务失败。", "error");
+    }
+  }
+}
+
 function toggleActionState(running) {
   els.runButton.disabled = running;
   els.runButtonBottom.disabled = running;
@@ -360,6 +481,52 @@ function toggleActionState(running) {
   els.copyResult.disabled = running || !hasResult;
   els.exportSelected.disabled = running || !hasResult;
   els.exportAll.disabled = running || !hasResult;
+  renderJobHistory();
+}
+
+function renderJobHistory() {
+  if (!els.jobHistory || !els.historyRetention) {
+    return;
+  }
+  const retentionHours = Number.parseInt(state.historyRetentionHours || 24, 10) || 24;
+  els.historyRetention.textContent = `保留最近 ${retentionHours} 小时`;
+
+  if (!state.session.authenticated) {
+    els.jobHistory.innerHTML = "登录后显示最近 24 小时任务";
+    els.jobHistory.className = "job-history empty-state";
+    return;
+  }
+
+  const jobs = Array.isArray(state.jobHistory) ? state.jobHistory : [];
+  if (!jobs.length) {
+    els.jobHistory.innerHTML = "最近 24 小时暂无任务";
+    els.jobHistory.className = "job-history empty-state";
+    return;
+  }
+
+  els.jobHistory.className = "job-history";
+  els.jobHistory.innerHTML = jobs
+    .map((job) => {
+      const status = String(job.status || "");
+      const active = state.currentJobId && state.currentJobId === job.job_id;
+      const preview = escapeHtml(job.source_text_preview || job.detail || job.message || "无预览");
+      const disabled = state.running ? "disabled" : "";
+      const meta = buildJobHistoryMeta(job)
+        .map((item) => `<span>${escapeHtml(item)}</span>`)
+        .join("");
+      return `
+        <button type="button" class="job-history-item${active ? " active" : ""}" data-job-id="${escapeHtml(job.job_id || "")}" ${disabled}>
+          <div class="job-history-top">
+            <span class="job-history-status ${escapeHtml(status)}">${escapeHtml(formatJobStatusLabel(status, job.progress_percent || 0))}</span>
+            <span class="job-history-time">${escapeHtml(formatDateTime(job.updated_at || job.created_at || ""))}</span>
+          </div>
+          <p class="job-history-title">${escapeHtml(job.message || "任务")}</p>
+          <p class="job-history-preview">${preview}</p>
+          <div class="job-history-meta">${meta}</div>
+        </button>
+      `;
+    })
+    .join("");
 }
 
 function setStatus(text, kind) {
@@ -391,7 +558,7 @@ function renderAnnotatedText(result) {
     return;
   }
 
-  const source = result.annotated_text || "";
+  const source = buildRenderedOutput(result);
   els.annotatedText.innerHTML = highlightMarkers(source);
   els.annotatedText.className = "output-box";
 }
@@ -563,6 +730,10 @@ function renderAttempts(attempts) {
   }
   return attempts
     .map((attempt) => {
+      const strategyLine = attempt.strategy_label
+        ? `<p><strong>策略:</strong> ${escapeHtml(attempt.strategy_label)}</p>`
+        : "";
+      const filterLine = formatAttemptFilters(attempt.applied_search_filters);
       const topResults = Array.isArray(attempt.top_results)
         ? attempt.top_results
             .map((item) => `${escapeHtml(item.pmid || "")} · ${escapeHtml(item.title || "")}`)
@@ -571,6 +742,8 @@ function renderAttempts(attempts) {
       return `
         <div class="attempt-item ${attempt.decision === "accept" ? "" : "retry"}">
           <h4>第 ${attempt.attempt} 轮 · ${escapeHtml(attempt.decision || "retry")}</h4>
+          ${strategyLine}
+          ${filterLine}
           <p><strong>Query:</strong> ${escapeHtml(attempt.query || "")}</p>
           <p><strong>结果数:</strong> ${escapeHtml(String(attempt.result_count || 0))}</p>
           <p><strong>原始命中:</strong> ${escapeHtml(String(attempt.raw_result_count || attempt.result_count || 0))}</p>
@@ -585,10 +758,14 @@ function renderAttempts(attempts) {
 }
 
 async function copyAnnotatedText() {
-  if (!state.result || !state.result.annotated_text) {
+  if (!state.result) {
     return;
   }
-  await navigator.clipboard.writeText(state.result.annotated_text);
+  const output = buildRenderedOutput(state.result);
+  if (!output) {
+    return;
+  }
+  await navigator.clipboard.writeText(output);
   setMessage("已复制。", "success");
 }
 
@@ -647,6 +824,18 @@ function highlightMarkers(text) {
   return escaped.replace(/\[(\d+(?:\s*,\s*\d+)*)\]/g, '<span class="ref-marker">[$1]</span>');
 }
 
+function buildRenderedOutput(result) {
+  if (!result) {
+    return "";
+  }
+  const annotatedText = String(result.annotated_text || "").trim();
+  const referenceBlock = String(result.reference_block || "").trim();
+  if (annotatedText && referenceBlock) {
+    return `${annotatedText}\n\n${referenceBlock}`;
+  }
+  return annotatedText || referenceBlock;
+}
+
 function formatMarkerLabel(markers) {
   const normalized = Array.isArray(markers)
     ? markers
@@ -666,6 +855,128 @@ function formatChosenPmids(attempt) {
     return chosen.join(", ");
   }
   return attempt.chosen_pmid || "-";
+}
+
+function formatAttemptFilters(filters) {
+  if (!filters || typeof filters !== "object") {
+    return "";
+  }
+
+  const parts = [];
+  if (filters.recent_years) {
+    parts.push(`近 ${filters.recent_years} 年`);
+  }
+
+  const hasMin = filters.impact_factor_min !== null
+    && filters.impact_factor_min !== undefined
+    && filters.impact_factor_min !== "";
+  const hasMax = filters.impact_factor_max !== null
+    && filters.impact_factor_max !== undefined
+    && filters.impact_factor_max !== "";
+  if (hasMin || hasMax) {
+    const lower = hasMin ? String(filters.impact_factor_min) : "-inf";
+    const upper = hasMax ? String(filters.impact_factor_max) : "+inf";
+    parts.push(`IF ${lower} ~ ${upper}`);
+  }
+
+  const summary = parts.length ? parts.join(" · ") : "未限制 IF / 年份";
+  return `<p><strong>筛选:</strong> ${escapeHtml(summary)}</p>`;
+}
+
+function upsertHistoryJob(job) {
+  if (!job || !job.job_id) {
+    return;
+  }
+  const summary = summarizeJob(job);
+  const next = Array.isArray(state.jobHistory) ? state.jobHistory.slice() : [];
+  const index = next.findIndex((item) => item.job_id === summary.job_id);
+  if (index >= 0) {
+    next[index] = { ...next[index], ...summary };
+  } else {
+    next.unshift(summary);
+  }
+  state.jobHistory = sortHistoryJobs(next).slice(0, 24);
+  renderJobHistory();
+}
+
+function summarizeJob(job) {
+  const result = job && job.result && typeof job.result === "object" ? job.result : null;
+  const sourceText = String((result && result.source_text) || job.source_text_preview || "");
+  const placementCount = result && Array.isArray(result.placements)
+    ? result.placements.length
+    : (Number.parseInt(job.placement_count || 0, 10) || 0);
+  const referenceCount = result && Array.isArray(result.references)
+    ? result.references.length
+    : (Number.parseInt(job.reference_count || 0, 10) || 0);
+  return {
+    job_id: job.job_id || "",
+    status: job.status || "",
+    progress_percent: Number.parseInt(job.progress_percent || 0, 10) || 0,
+    stage: job.stage || "",
+    message: job.message || "",
+    detail: job.detail || "",
+    error: job.error || "",
+    created_at: job.created_at || "",
+    updated_at: job.updated_at || "",
+    has_result: Boolean(result || job.has_result),
+    placement_count: placementCount,
+    reference_count: referenceCount,
+    source_text_preview: sourceText.slice(0, 160).trim(),
+    source_text_length: sourceText.length || Number.parseInt(job.source_text_length || 0, 10) || 0,
+  };
+}
+
+function sortHistoryJobs(jobs) {
+  return jobs
+    .slice()
+    .sort((left, right) => {
+      const leftTime = new Date(left.updated_at || left.created_at || 0).getTime();
+      const rightTime = new Date(right.updated_at || right.created_at || 0).getTime();
+      return rightTime - leftTime;
+    });
+}
+
+function buildJobHistoryMeta(job) {
+  const parts = [];
+  const placementCount = Number.parseInt(job.placement_count || 0, 10) || 0;
+  const referenceCount = Number.parseInt(job.reference_count || 0, 10) || 0;
+  const sourceLength = Number.parseInt(job.source_text_length || 0, 10) || 0;
+  if (placementCount > 0 || referenceCount > 0) {
+    parts.push(`${placementCount} 处插入`);
+    parts.push(`${referenceCount} 条文献`);
+  }
+  if (sourceLength > 0) {
+    parts.push(`${sourceLength} 字`);
+  }
+  if (!parts.length) {
+    parts.push("点击查看");
+  }
+  return parts;
+}
+
+function formatJobStatusLabel(status, progressPercent) {
+  const normalized = String(status || "").toLowerCase();
+  if (normalized === "completed") {
+    return "已完成";
+  }
+  if (normalized === "failed") {
+    return "失败";
+  }
+  if (normalized === "queued") {
+    return "排队中";
+  }
+  if (normalized === "running") {
+    return `处理中 ${Number.parseInt(progressPercent || 0, 10) || 0}%`;
+  }
+  return normalized || "任务";
+}
+
+function loadSourceTextFromJobResult(result) {
+  if (!result || !result.source_text) {
+    return;
+  }
+  els.sourceText.value = result.source_text;
+  persistDraft();
 }
 
 function buildCitationPayload(config, { continueExisting }) {
@@ -822,6 +1133,23 @@ function formatEventTime(value) {
     return "--:--:--";
   }
   return parsed.toLocaleTimeString("zh-CN", { hour12: false });
+}
+
+function formatDateTime(value) {
+  if (!value) {
+    return "--";
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return "--";
+  }
+  return parsed.toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
 }
 
 function wait(ms) {

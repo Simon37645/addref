@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 
-from app.services.citation_jobs import CitationJobStore
+from app.services.citation_jobs import CitationJobStore, JOB_TTL_HOURS
 from app.services.citation_pipeline import CitationPipeline, CitationPipelineError, SearchFilters
 from app.services.mailer import (
     MailDeliveryError,
@@ -80,6 +80,9 @@ class AddRefHandler(BaseHTTPRequestHandler):
         if path in {"/settings", "/settings.html"}:
             self._serve_file(STATIC_DIR / "settings.html", "text/html; charset=utf-8")
             return
+        if path in {"/history", "/history.html"}:
+            self._serve_file(STATIC_DIR / "history.html", "text/html; charset=utf-8")
+            return
         if path in {"/auth", "/auth.html"}:
             self._serve_file(STATIC_DIR / "auth.html", "text/html; charset=utf-8")
             return
@@ -91,6 +94,9 @@ class AddRefHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/session":
             self._handle_session()
+            return
+        if path == "/api/cite-jobs":
+            self._handle_list_cite_jobs()
             return
         if path == "/api/cite-jobs/latest":
             self._handle_get_latest_cite_job()
@@ -365,6 +371,16 @@ class AddRefHandler(BaseHTTPRequestHandler):
                 self._write_json({"error": "暂无最近任务。"}, status=HTTPStatus.NOT_FOUND)
                 return
             self._write_json(_serialize_job(job))
+        except AuthRequiredError as exc:
+            self._write_json({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)
+        except Exception as exc:  # noqa: BLE001
+            self._write_json({"error": f"Server error: {exc}"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def _handle_list_cite_jobs(self) -> None:
+        try:
+            user_context = self._require_user_context()
+            jobs = CITATION_JOB_STORE.list_jobs(user_id=int(user_context["user"]["id"]), limit=24)
+            self._write_json({"jobs": jobs, "retention_hours": JOB_TTL_HOURS})
         except AuthRequiredError as exc:
             self._write_json({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)
         except Exception as exc:  # noqa: BLE001

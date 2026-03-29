@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AddRef | History</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body class="app-home">
+  <div class="canvas canvas-grid" aria-hidden="true"></div>
+  <div class="canvas canvas-glow-a" aria-hidden="true"></div>
+  <div class="canvas canvas-glow-b" aria-hidden="true"></div>
+
+  <header class="site-header">
+    <a class="brand-mark" href="/">
+      <span class="brand-box">AR</span>
+      <span class="brand-copy">
+        <strong>AddRef</strong>
+        <small>历史任务</small>
+      </span>
+    </a>
+    <nav class="site-nav">
+      <a class="nav-link" href="/">工作台</a>
+      <a class="nav-link" href="/settings">设置</a>
+      <span class="nav-user hidden" id="session-email"></span>
+      <a class="nav-link" href="/auth" id="auth-link">登录</a>
+      <button type="button" class="nav-link nav-button hidden" id="logout-button">退出</button>
+    </nav>
+  </header>
+
+  <main class="workspace-shell history-page-shell">
+    <section class="workspace-grid history-layout">
+      <aside class="panel side-panel history-list-panel">
+        <div class="side-stack">
+          <div class="side-block">
+            <div class="history-head">
+              <span class="section-kicker">历史任务</span>
+              <button type="button" class="ghost-button compact-button" id="refresh-history">刷新</button>
+            </div>
+            <div class="history-retention" id="history-retention">保留最近 24 小时</div>
+            <div class="job-history empty-state" id="job-history">登录后显示最近 24 小时任务</div>
+          </div>
+
+          <div class="side-block">
+            <span class="section-kicker">账号</span>
+            <div class="account-card">
+              <strong id="account-email">未登录</strong>
+              <span id="account-usage">请先登录</span>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <section class="history-detail-grid">
+        <section class="panel progress-panel">
+          <div class="panel-head">
+            <div>
+              <span class="section-kicker">任务详情</span>
+              <h2 id="job-title">未选择任务</h2>
+            </div>
+            <div class="status-badge" id="job-status-badge">等待选择</div>
+          </div>
+          <div class="selected-job-summary" id="job-summary">从左侧选择任务后显示详情。</div>
+          <div class="progress-overview">
+            <div class="progress-track" aria-hidden="true">
+              <div class="progress-fill" id="progress-fill"></div>
+            </div>
+            <div class="progress-copy">
+              <strong id="progress-stage">等待开始</strong>
+              <span id="progress-detail">任务进度会显示在这里</span>
+            </div>
+          </div>
+          <div id="progress-history" class="progress-history empty-state">选择任务后显示步骤记录</div>
+        </section>
+
+        <section class="results-grid">
+          <article class="panel result-panel">
+            <div class="panel-head">
+              <div>
+                <span class="section-kicker">结果</span>
+                <h2>编号正文</h2>
+              </div>
+            </div>
+            <pre id="annotated-text" class="output-box empty">选择已完成任务后显示结果</pre>
+          </article>
+
+          <article class="panel result-panel">
+            <div class="panel-head">
+              <div>
+                <span class="section-kicker">参考文献</span>
+                <h2>参考文献</h2>
+              </div>
+            </div>
+            <div id="reference-list" class="reference-list empty-state">选择已完成任务后显示参考文献</div>
+          </article>
+        </section>
+
+        <section class="panel trace-panel">
+          <div class="panel-head">
+            <div>
+              <span class="section-kicker">轨迹</span>
+              <h2>检索轨迹</h2>
+            </div>
+          </div>
+          <div id="trace-list" class="trace-list empty-state">选择任务后显示检索轨迹</div>
+        </section>
+      </section>
+    </section>
+  </main>
+
+  <script src="/static/session-client.js"></script>
+  <script src="/static/history.js"></script>
+</body>
+</html>

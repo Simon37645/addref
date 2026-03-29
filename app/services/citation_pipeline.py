@@ -16,6 +16,29 @@ class CitationPipelineError(RuntimeError):
 
 
 MAX_ARTICLES_PER_SENTENCE = 3
+QUERY_META_TERMS = {
+    "and",
+    "or",
+    "not",
+    "title",
+    "abstract",
+    "publication",
+    "type",
+    "review",
+    "reviews",
+    "scoping",
+    "perspective",
+    "perspectives",
+    "comment",
+    "comments",
+    "mesh",
+    "majr",
+    "tiab",
+    "pt",
+    "all",
+    "field",
+    "fields",
+}
 
 
 @dataclass(slots=True)
@@ -44,6 +67,16 @@ class SearchFilters:
             "impact_factor_min": self.impact_factor_min,
             "impact_factor_max": self.impact_factor_max,
         }
+
+
+@dataclass(slots=True)
+class AttemptPlan:
+    phase: str
+    label: str
+    query_guidance: str
+    search_filters: SearchFilters
+    query_round_index: int = 0
+    query_round_total: int = 0
 
 
 class CitationPipeline:
@@ -295,29 +328,33 @@ class CitationPipeline:
     ) -> dict[str, Any]:
         current_query = (initial_query or fallback_query(sentence.text)).strip()
         attempts: list[dict[str, Any]] = []
-        min_publication_year = _minimum_publication_year(search_filters.recent_years)
-        raw_results_limit = _raw_results_limit(results_per_query, search_filters)
+        attempt_plans = _build_attempt_plans(max_attempts=max_attempts, base_filters=search_filters)
 
-        for attempt_index in range(1, max_attempts + 1):
+        for attempt_index, current_plan in enumerate(attempt_plans, start=1):
+            next_plan = attempt_plans[attempt_index] if attempt_index < len(attempt_plans) else None
+            min_publication_year = _minimum_publication_year(current_plan.search_filters.recent_years)
+            raw_results_limit = _raw_results_limit(results_per_query, current_plan.search_filters)
             _emit_progress(
                 progress_callback,
                 stage="search_attempt",
                 progress_percent=_target_progress(target_index - 1, total_targets, attempt_index - 1, max_attempts),
                 message=f"第 {target_index}/{max(total_targets, 1)} 句，第 {attempt_index}/{max_attempts} 轮检索。",
-                detail=current_query,
+                detail=f"{current_plan.label} · {current_query}",
             )
             raw_results = self.ncbi.search_pubmed(
                 current_query,
                 retmax=raw_results_limit,
                 min_publication_year=min_publication_year,
             )
-            filtered_results = self._filter_results(raw_results, search_filters)
+            filtered_results = self._filter_results(raw_results, current_plan.search_filters)
             results = filtered_results[:results_per_query]
             evaluation = self._evaluate_results(
                 sentence=sentence,
                 claim_summary=claim_summary,
                 reason=reason,
                 current_query=current_query,
+                current_plan=current_plan,
+                next_plan=next_plan,
                 attempt_index=attempt_index,
                 attempts=attempts,
                 results=results,
@@ -336,6 +373,9 @@ class CitationPipeline:
                     "raw_result_count": len(raw_results),
                     "filtered_out_count": max(0, len(raw_results) - len(results)),
                     "decision": decision or "retry",
+                    "strategy": current_plan.phase,
+                    "strategy_label": current_plan.label,
+                    "applied_search_filters": current_plan.search_filters.to_dict(),
                     "chosen_pmid": selected_pmids[0] if selected_pmids else "",
                     "chosen_pmids": selected_pmids,
                     "confidence": confidence,
@@ -361,15 +401,21 @@ class CitationPipeline:
                         "final_query": current_query,
                     }
 
-            next_query = improved_query or fallback_query(sentence.text)
-            if next_query.strip().lower() == current_query.strip().lower():
-                next_query = mutate_query(current_query, sentence.text, attempt_index)
+            if next_plan is None:
+                continue
+            next_query = build_retry_query(
+                current_query=current_query,
+                improved_query=improved_query,
+                sentence_text=sentence.text,
+                attempt_index=attempt_index,
+                next_plan=next_plan,
+            )
             _emit_progress(
                 progress_callback,
                 stage="refine_query",
                 progress_percent=_target_progress(target_index - 1, total_targets, attempt_index, max_attempts),
                 message=f"第 {target_index}/{max(total_targets, 1)} 句继续改写检索词。",
-                detail=next_query,
+                detail=f"{next_plan.label} · {next_query}",
             )
             current_query = next_query.strip()
 
@@ -427,6 +473,8 @@ class CitationPipeline:
         claim_summary: str,
         reason: str,
         current_query: str,
+        current_plan: AttemptPlan,
+        next_plan: AttemptPlan | None,
         attempt_index: int,
         attempts: list[dict[str, Any]],
         results: list[PubMedArticle],
@@ -446,13 +494,20 @@ class CitationPipeline:
             f"Accept only when one or more listed results clearly support the sentence. Choose 1 to {MAX_ARTICLES_PER_SENTENCE} PMIDs only. "
             "Prefer the smallest sufficient set. Multiple PMIDs are allowed when they are all directly relevant. "
             "If results are weak, off-topic, too broad, or missing, set decision to retry and give a better "
-            "English PubMed-style query. chosen_pmids must be an empty array when decision is retry."
+            "English PubMed-style query. chosen_pmids must be an empty array when decision is retry. "
+            "When you provide improved_query for a retry, follow the requested next-round strategy and do not make "
+            "the next query narrower than instructed."
         )
         user_prompt = (
             f"Sentence: {sentence.text}\n"
             f"Claim summary: {claim_summary}\n"
             f"Why this sentence needs citation: {reason}\n"
             f"Current query: {current_query}\n"
+            f"Current round strategy: {current_plan.label}\n"
+            f"Current round filters: {_describe_search_filters(current_plan.search_filters)}\n"
+            f"Next round strategy if retry: {next_plan.label if next_plan else 'No next round; this is the final attempt.'}\n"
+            f"Next round filters if retry: {_describe_search_filters(next_plan.search_filters) if next_plan else 'No next round.'}\n"
+            f"Next round query guidance: {next_plan.query_guidance if next_plan else 'No next round.'}\n"
             f"Attempt: {attempt_index}\n"
             f"Previous attempts:\n{previous_attempts or '- none'}\n\n"
             f"PubMed results:\n{result_text}\n\n"
@@ -569,6 +624,28 @@ def mutate_query(current_query: str, sentence_text: str, attempt_index: int) -> 
     return current_query
 
 
+def build_retry_query(
+    *,
+    current_query: str,
+    improved_query: str,
+    sentence_text: str,
+    attempt_index: int,
+    next_plan: AttemptPlan,
+) -> str:
+    candidate_query = _normalize_query_text(improved_query or current_query or fallback_query(sentence_text))
+    if next_plan.phase == "strict":
+        if candidate_query.strip().lower() != _normalize_query_text(current_query).lower():
+            return candidate_query
+        return _build_strict_retry_query(current_query=current_query, sentence_text=sentence_text, attempt_index=attempt_index)
+
+    relaxed_query = _build_relaxed_query(candidate_query, sentence_text, next_plan)
+    if relaxed_query.strip().lower() == _normalize_query_text(current_query).lower():
+        relaxed_query = _build_relaxed_query(sentence_text, sentence_text, next_plan)
+    if not relaxed_query:
+        return _normalize_query_text(mutate_query(current_query, sentence_text, attempt_index))
+    return relaxed_query
+
+
 def _normalize_selected_pmids(response: dict[str, Any], results: list[PubMedArticle]) -> list[str]:
     valid_pmids = {article.pmid for article in results}
     ordered_result_pmids = [article.pmid for article in results]
@@ -596,6 +673,198 @@ def _normalize_selected_pmids(response: dict[str, Any], results: list[PubMedArti
         if len(selected) >= MAX_ARTICLES_PER_SENTENCE:
             break
     return selected
+
+
+def _build_attempt_plans(max_attempts: int, base_filters: SearchFilters) -> list[AttemptPlan]:
+    strict_rounds = min(3, max_attempts)
+    remaining_rounds = max(0, max_attempts - strict_rounds)
+
+    phase_sequence = ["strict"] * strict_rounds
+    if remaining_rounds > 0:
+        tail_phases = ["topic_only"]
+        if remaining_rounds >= 2:
+            tail_phases.insert(0, "relax_query")
+        if base_filters.has_impact_factor_filter() and remaining_rounds > len(tail_phases):
+            tail_phases.insert(-1, "relax_if")
+        if base_filters.recent_years is not None and remaining_rounds > len(tail_phases):
+            tail_phases.insert(-1, "relax_year")
+
+        extra_query_rounds = max(0, remaining_rounds - len(tail_phases))
+        phase_sequence.extend(["relax_query"] * extra_query_rounds)
+        phase_sequence.extend(tail_phases)
+
+    total_query_rounds = phase_sequence.count("relax_query")
+    query_round_index = 0
+    plans: list[AttemptPlan] = []
+    for phase in phase_sequence:
+        if phase == "relax_query":
+            query_round_index += 1
+        plans.append(
+            _build_attempt_plan(
+                phase=phase,
+                base_filters=base_filters,
+                query_round_index=query_round_index,
+                query_round_total=total_query_rounds,
+            )
+        )
+    return plans
+
+
+def _build_attempt_plan(
+    *,
+    phase: str,
+    base_filters: SearchFilters,
+    query_round_index: int,
+    query_round_total: int,
+) -> AttemptPlan:
+    if phase == "strict":
+        return AttemptPlan(
+            phase=phase,
+            label="严格条件",
+            query_guidance=(
+                "Keep the query specific. Preserve the core disease/exposure/outcome concepts and do not "
+                "broaden the search yet."
+            ),
+            search_filters=SearchFilters(
+                recent_years=base_filters.recent_years,
+                impact_factor_min=base_filters.impact_factor_min,
+                impact_factor_max=base_filters.impact_factor_max,
+            ),
+        )
+    if phase == "relax_query":
+        return AttemptPlan(
+            phase=phase,
+            label=f"放宽检索词 {query_round_index}/{max(query_round_total, 1)}",
+            query_guidance=(
+                "Broaden the search modestly. Remove secondary modifiers, publication-type limits, and redundant "
+                "synonyms, but keep the same biomedical topic."
+            ),
+            search_filters=SearchFilters(
+                recent_years=base_filters.recent_years,
+                impact_factor_min=base_filters.impact_factor_min,
+                impact_factor_max=base_filters.impact_factor_max,
+            ),
+            query_round_index=query_round_index,
+            query_round_total=query_round_total,
+        )
+    if phase == "relax_if":
+        return AttemptPlan(
+            phase=phase,
+            label="放宽 IF",
+            query_guidance=(
+                "Broaden the query further. The next round may ignore impact-factor limits, so keep only the "
+                "main biomedical concepts."
+            ),
+            search_filters=SearchFilters(recent_years=base_filters.recent_years),
+        )
+    if phase == "relax_year":
+        return AttemptPlan(
+            phase=phase,
+            label="放宽年份",
+            query_guidance=(
+                "Broaden the query again. The next round may ignore both impact-factor and year limits, so keep "
+                "only the central topic terms."
+            ),
+            search_filters=SearchFilters(),
+        )
+    return AttemptPlan(
+        phase="topic_only",
+        label="主题兜底",
+        query_guidance=(
+            "Final fallback. Keep only the core topic terms that best represent the sentence and ignore IF/year "
+            "constraints."
+        ),
+        search_filters=SearchFilters(),
+    )
+
+
+def _describe_search_filters(search_filters: SearchFilters) -> str:
+    parts: list[str] = []
+    if search_filters.recent_years is not None:
+        parts.append(f"publication year within the last {search_filters.recent_years} years")
+    if search_filters.has_impact_factor_filter():
+        lower = (
+            f">= {search_filters.impact_factor_min:.3f}"
+            if search_filters.impact_factor_min is not None
+            else "no lower bound"
+        )
+        upper = (
+            f"<= {search_filters.impact_factor_max:.3f}"
+            if search_filters.impact_factor_max is not None
+            else "no upper bound"
+        )
+        parts.append(f"impact factor {lower}, {upper}")
+    return "; ".join(parts) if parts else "no IF or year filters"
+
+
+def _build_relaxed_query(query_text: str, sentence_text: str, attempt_plan: AttemptPlan) -> str:
+    primary_terms = _extract_search_terms(query_text)
+    secondary_terms = _extract_search_terms(sentence_text)
+    if attempt_plan.phase == "topic_only":
+        merged_terms = _merge_terms(secondary_terms, primary_terms)
+    else:
+        merged_terms = _merge_terms(primary_terms, secondary_terms)
+
+    if not merged_terms:
+        return _normalize_query_text(fallback_query(sentence_text))
+
+    limit = _query_term_limit(attempt_plan)
+    query = " ".join(merged_terms[:limit])
+    current_normalized = _normalize_query_text(query_text).lower()
+    if current_normalized and _normalize_query_text(query).lower() == current_normalized and len(merged_terms) > 3:
+        query = " ".join(merged_terms[: max(3, limit - 1)])
+    return _normalize_query_text(query)
+
+
+def _build_strict_retry_query(*, current_query: str, sentence_text: str, attempt_index: int) -> str:
+    query_terms = _extract_search_terms(current_query)
+    if query_terms:
+        limit = max(6, 9 - min(2, max(0, attempt_index - 1)))
+        return _normalize_query_text(" ".join(query_terms[:limit]))
+    return _normalize_query_text(mutate_query(current_query, sentence_text, attempt_index))
+
+
+def _query_term_limit(attempt_plan: AttemptPlan) -> int:
+    if attempt_plan.phase == "relax_query":
+        return max(4, 8 - min(4, attempt_plan.query_round_index))
+    if attempt_plan.phase == "relax_if":
+        return 5
+    return 4
+
+
+def _extract_search_terms(text: str) -> list[str]:
+    normalized = re.sub(r"\[[^\]]+\]", " ", str(text or ""))
+    normalized = normalized.replace("*", " ")
+    normalized = re.sub(r"[^\w\s-]", " ", normalized, flags=re.UNICODE)
+    terms: list[str] = []
+    seen: set[str] = set()
+    for raw_term in normalized.split():
+        term = raw_term.strip("-_").lower()
+        if len(term) < 3 or term.isdigit():
+            continue
+        if term in QUERY_META_TERMS:
+            continue
+        if term in seen:
+            continue
+        seen.add(term)
+        terms.append(term)
+    return terms
+
+
+def _merge_terms(primary_terms: list[str], secondary_terms: list[str]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for term in primary_terms + secondary_terms:
+        normalized = str(term or "").strip().lower()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        merged.append(normalized)
+    return merged
+
+
+def _normalize_query_text(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
 def _normalize_existing_references(references: list[dict[str, Any]]) -> list[dict[str, Any]]:
